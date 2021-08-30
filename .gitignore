@@ -25,3 +25,6 @@ build
 node_modules
 CMakeSettings.json
 xcuserdata/
+
+cmake-build-debug/
+*build*/
