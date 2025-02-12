@@ -1,0 +1,19 @@
+我们可以看到test目录下面并没有CMakeLists.txt文件，那里面的test_xx.cpp是怎么识别的呢
+
+经过一段时间的搜索，opencv集成google test，应该在modules/ts中
+
+* how modules/ts include
+#+begin_src 
+add_subdirectory ts/CMakeLists.txt:1
+_add_modules_1 OpenCVModule.cmake:299
+ocv_glob_modules OpenCVModule.cmake:361
+ocv_register_modules OpenCVModule.cmake:408
+opencv/CMakeLists.txt:967
+#+end_src
+
+* 
+
+* 参考链接
+- https://quentin.bonnard.eu/blog/2013/10/16/Using-OpenCV_s_test_framework_with_CMake/
+
+
