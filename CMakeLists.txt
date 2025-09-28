@@ -105,6 +105,7 @@ if(DEFINED OPENCV_CMAKE_HOOKS_DIR)
   endforeach()
 endif()
 
+
 ocv_cmake_hook(CMAKE_INIT)
 
 # must go before the project()/enable_language() commands
@@ -132,6 +133,15 @@ if(OPENCV_WORKAROUND_CMAKE_20989)
 endif()
 
 project(OpenCV CXX C)
+
+set(ANDROID_PYTHON OFF CACHE INTERNAL "Build python binding on Android")
+message("ANDROID: ${ANDROID}, BUILD_opencv_python3: ${BUILD_opencv_python3}")
+if(ANDROID AND BUILD_opencv_python3)
+    set(ANDROID_PYTHON ON CACHE INTERNAL "Build python binding on Android")
+endif()
+
+message("111 ANDROID_PYTHON: ${ANDROID_PYTHON}")
+
 
 if(OPENCV_WORKAROUND_CMAKE_20989)
   set(CMAKE_SYSTEM_PROCESSOR ${CMAKE_SYSTEM_PROCESSOR_BACKUP})
@@ -1962,6 +1972,7 @@ endif()
 if(BUILD_opencv_python3)
   status("")
   status("  Python 3:")
+  status("    HAVE_opencv_python3: ${HAVE_opencv_python3}")
   status("    Interpreter:"     PYTHON3INTERP_FOUND  THEN "${PYTHON3_EXECUTABLE} (ver ${PYTHON3_VERSION_STRING})"       ELSE NO)
   if(PYTHON3LIBS_VERSION_STRING)
     status("    Libraries:"   HAVE_opencv_python3  THEN  "${PYTHON3_LIBRARIES} (ver ${PYTHON3LIBS_VERSION_STRING})"   ELSE NO)
