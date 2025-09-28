@@ -1,0 +1,13 @@
+#+begin_src cmake
+if(NOT IOS AND NOT XROS)
+  include(cmake/OpenCVDetectPython.cmake)
+  include(cmake/OpenCVDetectDLPack.cmake)
+endif()
+
+
+if(BUILD_opencv_python3)
+  status("")
+  status("  Python 3:")
+# balabala
+endif()
+#+end_src
