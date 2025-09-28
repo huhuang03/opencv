@@ -60,11 +60,17 @@ namespace cv
 #undef USE_IPP_DFT
 #endif
 
+#if defined USE_IPP_DFT
+#if IPP_VERSION_X100 >= 202220
+#define IPP_DISABLE_DFT32F ((depth == CV_32F) && (ippCPUID_AVX512F&cv::ipp::getIppFeatures()))
+#else
+#define IPP_DISABLE_DFT32F false
+#endif
+#endif
+
 /****************************************************************************************\
                                Discrete Fourier Transform
 \****************************************************************************************/
-
-#define CV_MAX_LOCAL_DFT_SIZE  (1 << 15)
 
 static unsigned char bitrevTab[] =
 {
@@ -238,7 +244,7 @@ DFTInit( int n0, int nf, const int* factors, int* itab, int elem_size, void* _wa
     else
     {
         // radix[] is initialized from index 'nf' down to zero
-        assert (nf < 34);
+        CV_Assert (nf < 34);
         radix[nf] = 1;
         digits[nf] = 0;
         for( i = 0; i < nf; i++ )
@@ -374,7 +380,7 @@ DFTInit( int n0, int nf, const int* factors, int* itab, int elem_size, void* _wa
     else
     {
         Complex<float>* wave = (Complex<float>*)_wave;
-        assert( elem_size == sizeof(Complex<float>) );
+        CV_Assert( elem_size == sizeof(Complex<float>) );
 
         wave[0].re = 1.f;
         wave[0].im = 0.f;
@@ -846,6 +852,17 @@ DFT(const OcvDftOptions & c, const Complex<T>* src, Complex<T>* dst)
     Complex<T> t;
     T scale = (T)c.scale;
 
+    if(typeid(T) == typeid(float))
+    {
+        CALL_HAL(dft, cv_hal_dft, reinterpret_cast<const uchar*>(src), reinterpret_cast<uchar*>(dst), CV_32F,
+                 c.nf, c.factors, c.scale, c.itab, c.wave, c.tab_size, c.n, c.isInverse, c.noPermute);
+    }
+    if(typeid(T) == typeid(double))
+    {
+        CALL_HAL(dft, cv_hal_dft, reinterpret_cast<const uchar*>(src), reinterpret_cast<uchar*>(dst), CV_64F,
+                 c.nf, c.factors, c.scale, c.itab, c.wave, c.tab_size, c.n, c.isInverse, c.noPermute);
+    }
+
     if( c.useIpp )
     {
 #ifdef USE_IPP_DFT
@@ -874,13 +891,13 @@ DFT(const OcvDftOptions & c, const Complex<T>* src, Complex<T>* dst)
     // 0. shuffle data
     if( dst != src )
     {
-        assert( !c.noPermute );
+        CV_Assert( !c.noPermute );
         if( !inv )
         {
             for( i = 0; i <= n - 2; i += 2, itab += 2*tab_step )
             {
                 int k0 = itab[0], k1 = itab[tab_step];
-                assert( (unsigned)k0 < (unsigned)n && (unsigned)k1 < (unsigned)n );
+                CV_Assert( (unsigned)k0 < (unsigned)n && (unsigned)k1 < (unsigned)n );
                 dst[i] = src[k0]; dst[i+1] = src[k1];
             }
 
@@ -892,7 +909,7 @@ DFT(const OcvDftOptions & c, const Complex<T>* src, Complex<T>* dst)
             for( i = 0; i <= n - 2; i += 2, itab += 2*tab_step )
             {
                 int k0 = itab[0], k1 = itab[tab_step];
-                assert( (unsigned)k0 < (unsigned)n && (unsigned)k1 < (unsigned)n );
+                CV_Assert( (unsigned)k0 < (unsigned)n && (unsigned)k1 < (unsigned)n );
                 t.re = src[k0].re; t.im = -src[k0].im;
                 dst[i] = t;
                 t.re = src[k1].re; t.im = -src[k1].im;
@@ -921,7 +938,7 @@ DFT(const OcvDftOptions & c, const Complex<T>* src, Complex<T>* dst)
                     for( i = 0; i < n2; i += 2, itab += tab_step*2 )
                     {
                         j = itab[0];
-                        assert( (unsigned)j < (unsigned)n2 );
+                        CV_Assert( (unsigned)j < (unsigned)n2 );
 
                         CV_SWAP(dst[i+1], dsth[j], t);
                         if( j > i )
@@ -938,7 +955,7 @@ DFT(const OcvDftOptions & c, const Complex<T>* src, Complex<T>* dst)
                 for( i = 0; i < n; i++, itab += tab_step )
                 {
                     j = itab[0];
-                    assert( (unsigned)j < (unsigned)n );
+                    CV_Assert( (unsigned)j < (unsigned)n );
                     if( j > i )
                         CV_SWAP(dst[i], dst[j], t);
                 }
@@ -1218,7 +1235,7 @@ RealDFT(const OcvDftOptions & c, const T* src, T* dst)
         setIppErrorStatus();
 #endif
     }
-    assert( c.tab_size == n );
+    CV_Assert( c.tab_size == n );
 
     if( n == 1 )
     {
@@ -1338,11 +1355,11 @@ CCSIDFT(const OcvDftOptions & c, const T* src, T* dst)
     T save_s1 = 0.;
     T t0, t1, t2, t3, t;
 
-    assert( c.tab_size == n );
+    CV_Assert( c.tab_size == n );
 
     if( complex_input )
     {
-        assert( src != dst );
+        CV_Assert( src != dst );
         save_s1 = src[1];
         ((T*)src)[1] = src[0];
         src++;
@@ -3177,7 +3194,7 @@ protected:
             }
             else
             {
-                assert( !inv );
+                CV_Assert( !inv );
                 CopyColumn( dbuf0, complex_elem_size, dptr0,
                                dst_step, len, complex_elem_size );
                 if( even )
@@ -3249,7 +3266,7 @@ public:
         opt.ipp_spec = 0;
         opt.ipp_work = 0;
 
-        if( CV_IPP_CHECK_COND && (opt.n*count >= 64) ) // use IPP DFT if available
+        if( CV_IPP_CHECK_COND && (opt.n*count >= 64) && !IPP_DISABLE_DFT32F) // use IPP DFT if available
         {
             int ipp_norm_flag = (flags & CV_HAL_DFT_SCALE) == 0 ? 8 : opt.isInverse ? 2 : 1;
             int specsize=0, initsize=0, worksize=0;
@@ -3471,7 +3488,7 @@ Ptr<DFT2D> DFT2D::create(int width, int height, int depth,
     {
         if(width == 1 && nonzero_rows > 0 )
         {
-            CV_Error( CV_StsNotImplemented,
+            CV_Error( cv::Error::StsNotImplemented,
             "This mode (using nonzero_rows with a single-column matrix) breaks the function's logic, so it is prohibited.\n"
             "For fast convolution/correlation use 2-column matrix or single-row matrix instead" );
         }
@@ -3874,7 +3891,7 @@ DCTInit( int n, int elem_size, void* _wave, int inv )
     if( n == 1 )
         return;
 
-    assert( (n&1) == 0 );
+    CV_Assert( (n&1) == 0 );
 
     if( (n & (n - 1)) == 0 )
     {
@@ -3912,7 +3929,7 @@ DCTInit( int n, int elem_size, void* _wave, int inv )
     else
     {
         Complex<float>* wave = (Complex<float>*)_wave;
-        assert( elem_size == sizeof(Complex<float>) );
+        CV_Assert( elem_size == sizeof(Complex<float>) );
 
         w.re = (float)scale;
         w.im = 0.f;
@@ -4319,7 +4336,7 @@ public:
             if( len != prev_len )
             {
                 if( len > 1 && (len & 1) )
-                    CV_Error( CV_StsNotImplemented, "Odd-size DCT\'s are not implemented" );
+                    CV_Error( cv::Error::StsNotImplemented, "Odd-size DCT\'s are not implemented" );
 
                 opt.nf = DFTFactorize( len, opt.factors );
                 bool inplace_transform = opt.factors[0] == opt.factors[opt.nf-1];
@@ -4365,7 +4382,7 @@ struct ReplacementDCT2D : public hal::DCT2D
     ReplacementDCT2D() : context(0), isInitialized(false) {}
     bool init(int width, int height, int depth, int flags)
     {
-        int res = hal_ni_dctInit2D(&context, width, height, depth, flags);
+        int res = cv_hal_dctInit2D(&context, width, height, depth, flags);
         isInitialized = (res == CV_HAL_ERROR_OK);
         return isInitialized;
     }

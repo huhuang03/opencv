@@ -46,6 +46,8 @@
 #include "../op_halide.hpp"
 #include "../op_inf_engine.hpp"
 #include "../ie_ngraph.hpp"
+#include "../op_cann.hpp"
+
 #include <opencv2/dnn/shape_utils.hpp>
 
 #ifdef HAVE_OPENCL
@@ -71,7 +73,8 @@ public:
         PROD = 0,
         SUM = 1,
         MAX = 2,
-        DIV = 3
+        DIV = 3,
+        MIN = 4,
     } op;
     std::vector<float> coeffs;
 
@@ -103,12 +106,14 @@ public:
         if (params.has("operation"))
         {
             String operation = toLowerCase(params.get<String>("operation"));
-            if (operation == "prod")
+            if (operation == "prod" || operation == "mul")
                 op = PROD;
             else if (operation == "sum")
                 op = SUM;
             else if (operation == "max")
                 op = MAX;
+            else if (operation == "min")
+                op = MIN;
             else if (operation == "div")
                 op = DIV;
             else
@@ -161,6 +166,16 @@ public:
         if (hasVecInput && ELTWISE_CHANNNELS_SAME)
             return backendId == DNN_BACKEND_OPENCV;
 
+#ifdef HAVE_INF_ENGINE
+        if (backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+            return channelsMode == ELTWISE_CHANNNELS_SAME;
+#endif
+
+#ifdef HAVE_CANN
+        if (backendId == DNN_BACKEND_CANN)
+            return channelsMode == ELTWISE_CHANNNELS_SAME && coeffs.empty();
+#endif
+
         if (backendId == DNN_BACKEND_CUDA)
         {
             if(channelsModeInput == ELTWISE_CHANNNELS_INPUT_0 || channelsModeInput == ELTWISE_CHANNNELS_INPUT_0_TRUNCATE)
@@ -169,9 +184,8 @@ public:
         }
 
         return backendId == DNN_BACKEND_OPENCV ||
-               (backendId == DNN_BACKEND_HALIDE && op != DIV) ||  // TODO: not implemented, see PR #15811
-               ((((backendId == DNN_BACKEND_INFERENCE_ENGINE_NN_BUILDER_2019 && (preferableTarget != DNN_TARGET_OPENCL || coeffs.empty()))
-                || backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH) && channelsMode == ELTWISE_CHANNNELS_SAME));
+               (backendId == DNN_BACKEND_HALIDE && op != DIV)  // TODO: not implemented, see PR #15811
+               ;
     }
 
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
@@ -470,6 +484,13 @@ public:
                                     dstptr[j] = std::max(srcptr0[j], srcptrI[j]);
                                 }
                             }
+                            else if (op == MIN)
+                            {
+                                for (int j = 0; j < blockSize; j++)
+                                {
+                                    dstptr[j] = std::min(srcptr0[j], srcptrI[j]);
+                                }
+                            }
                             else if (op == SUM)
                             {
                                 if (!coeffsptr || (coeffsptr[0] == 1.0f && coeffsptr[1] == 1.0f))
@@ -524,6 +545,13 @@ public:
                                 dstptr[j] = std::max(dstptr[j], srcptrI[j]);
                             }
                         }
+                        else if (op == MIN)
+                        {
+                            for (int j = 0; j < blockSize; j++)
+                            {
+                                dstptr[j] = std::min(dstptr[j], srcptrI[j]);
+                            }
+                        }
                         else if (op == SUM)
                         {
                             if (!coeffsptr || coeffsptr[inputIdx] == 1.0f)
@@ -562,7 +590,7 @@ public:
         std::vector<UMat> inputs;
         std::vector<UMat> outputs;
 
-        if ((inputs_.depth() == CV_16S && op != SUM) || (channelsMode != ELTWISE_CHANNNELS_SAME))
+        if ((inputs_.depth() == CV_16F && op != SUM) || (channelsMode != ELTWISE_CHANNNELS_SAME))
             return false;
 
         if (hasVecInput)
@@ -582,7 +610,7 @@ public:
                         size_t localsize[] = { 128 };
                         size_t globalsize[] = { (size_t)channels / 4 * localsize[0] };
                         String opts;
-                        if (inputs_.depth() == CV_16S)
+                        if (inputs_.depth() == CV_16F)
                             opts = " -DDtype=half -DDtype4=half4 -DDtype8=half8";
                         else
                             opts = " -DDtype=float -DDtype4=float4 -DDtype8=float8";
@@ -608,7 +636,7 @@ public:
                     }
                     else
                     {
-                        if (inputs_.depth() == CV_16S)
+                        if (inputs_.depth() == CV_16F)
                             return false;
 
                         float coeff1 = coeffs.empty() ? 1.f : coeffs[0];
@@ -641,6 +669,11 @@ public:
                 for (int i = 2; i < inputs.size(); ++i)
                     max(inputs[i], outputs[0], outputs[0]);
                 break;
+            case MIN:
+                min(inputs[0], inputs[1], outputs[0]);
+                for (int i = 2; i < inputs.size(); ++i)
+                    min(inputs[i], outputs[0], outputs[0]);
+                break;
             default:
                 return false;
         }
@@ -656,7 +689,7 @@ public:
         CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget),
                    forward_ocl(inputs_arr, outputs_arr, internals_arr))
 
-        if (inputs_arr.depth() == CV_16S)
+        if (inputs_arr.depth() == CV_16F)
         {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
             return;
@@ -745,6 +778,7 @@ public:
         auto op_ = [this] {
             switch (op) {
             case MAX: return cuda4dnn::EltwiseOpType::MAX;
+            case MIN: return cuda4dnn::EltwiseOpType::MIN;
             case SUM: return cuda4dnn::EltwiseOpType::SUM;
             case PROD: return cuda4dnn::EltwiseOpType::PRODUCT;
             case DIV: return cuda4dnn::EltwiseOpType::DIV;
@@ -799,6 +833,12 @@ public:
                 for (int i = 2; i < inputBuffers.size(); ++i)
                     topExpr = max(topExpr, inputBuffers[i](x, y, c, n));
                 break;
+            case MIN:
+                topExpr = min(inputBuffers[0](x, y, c, n),
+                              inputBuffers[1](x, y, c, n));
+                for (int i = 2; i < inputBuffers.size(); ++i)
+                    topExpr = min(topExpr, inputBuffers[i](x, y, c, n));
+                break;
             default:
                 return Ptr<BackendNode>();
         }
@@ -808,65 +848,88 @@ public:
         return Ptr<BackendNode>();
     }
 
-#ifdef HAVE_DNN_IE_NN_BUILDER_2019
-    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >& inputs) CV_OVERRIDE
+#ifdef HAVE_CANN
+    virtual Ptr<BackendNode> initCann(const std::vector<Ptr<BackendWrapper> > &inputs,
+                                      const std::vector<Ptr<BackendWrapper> > &outputs,
+                                      const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
     {
-        InferenceEngine::Builder::EltwiseLayer ieLayer(name);
+        CV_Assert(inputs.size() == 2);
+        CV_Assert(nodes.size() == 2);
 
-        ieLayer.setInputPorts(std::vector<InferenceEngine::Port>(inputs.size()));
+        auto op_x1 = nodes[0].dynamicCast<CannBackendNode>()->getOp();
+        auto x1 = inputs[0].dynamicCast<CannBackendWrapper>();
+        auto x1_desc = x1->getTensorDesc();
+        auto op_x2 = nodes[1].dynamicCast<CannBackendNode>()->getOp();
+        auto x2 = inputs[1].dynamicCast<CannBackendWrapper>();
+        auto x2_desc = x2->getTensorDesc();
+        auto output_desc = std::make_shared<ge::TensorDesc>(ge::Shape(), ge::FORMAT_NCHW, ge::DT_FLOAT);
 
-        if (op == SUM)
-            ieLayer.setEltwiseType(InferenceEngine::Builder::EltwiseLayer::EltwiseType::SUM);
-        else if (op == PROD)
-            ieLayer.setEltwiseType(InferenceEngine::Builder::EltwiseLayer::EltwiseType::MUL);
-        else if (op == DIV)
-            ieLayer.setEltwiseType(InferenceEngine::Builder::EltwiseLayer::EltwiseType::DIV);
-        else if (op == MAX)
-            ieLayer.setEltwiseType(InferenceEngine::Builder::EltwiseLayer::EltwiseType::MAX);
-        else
-            CV_Error(Error::StsNotImplemented, "Unsupported eltwise operation");
+        std::shared_ptr<ge::Operator> eltwise_operator = nullptr;
+        // add, mul, div, max, min
+        switch (op)
+        {
+#define BUILD_CANN_ELTWISE_OP(op_type, class_name, op_name)                 \
+            case op_type: {                                                 \
+                auto eltwise_op =                                           \
+                  std::make_shared<ge::op::class_name>(op_name);            \
+                eltwise_op->set_input_x1_by_name(*op_x1, x1->name.c_str()); \
+                eltwise_op->set_input_x2_by_name(*op_x2, x2->name.c_str()); \
+                eltwise_op->update_input_desc_x1(*x1_desc);                 \
+                eltwise_op->update_input_desc_x2(*x2_desc);                 \
+                eltwise_op->update_output_desc_y(*output_desc);             \
+                eltwise_operator = eltwise_op;                              \
+            } break;
+            BUILD_CANN_ELTWISE_OP(SUM, Add, name);
+            BUILD_CANN_ELTWISE_OP(PROD, Mul, name);
+            BUILD_CANN_ELTWISE_OP(DIV, Xdivy, name);
+            BUILD_CANN_ELTWISE_OP(MAX, Maximum, name);
+            BUILD_CANN_ELTWISE_OP(MIN, Minimum, name);
+#undef BUILD_CANN_ELTWISE_OP
+            default: CV_Error(Error::StsNotImplemented, "Unsupported eltwise operation");
+        }
 
-        InferenceEngine::Builder::Layer l = ieLayer;
-        if (!coeffs.empty())
-            l.getParameters()["coeff"] = coeffs;
-
-        return Ptr<BackendNode>(new InfEngineBackendNode(l));
+        return Ptr<BackendNode>(new CannBackendNode(eltwise_operator));
     }
-#endif  // HAVE_DNN_IE_NN_BUILDER_2019
-
+#endif // HAVE_CANN
 
 #ifdef HAVE_DNN_NGRAPH
     virtual Ptr<BackendNode> initNgraph(const std::vector<Ptr<BackendWrapper> >& inputs,
                                         const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
     {
+        CV_Assert(nodes.size() >= 2);
         auto curr_node = nodes[0].dynamicCast<InfEngineNgraphNode>()->node;
         if (!coeffs.empty()) {
-            auto coeff = std::make_shared<ngraph::op::Constant>(ngraph::element::f32, ngraph::Shape{1}, &coeffs[0]);
-            curr_node = std::make_shared<ngraph::op::v1::Multiply>(curr_node, coeff, ngraph::op::AutoBroadcastType::NUMPY);
+            auto coeff = std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape{1}, &coeffs[0]);
+            curr_node = std::make_shared<ov::op::v1::Multiply>(curr_node, coeff, ov::op::AutoBroadcastType::NUMPY);
         }
 
+        std::shared_ptr<ov::Node> res;
         for (size_t i = 1; i < nodes.size(); i++)
         {
             auto next_node = nodes[i].dynamicCast<InfEngineNgraphNode>()->node;
             if (!coeffs.empty()) {
-                auto coeff = std::make_shared<ngraph::op::Constant>(ngraph::element::f32, ngraph::Shape{1}, &coeffs[i]);
-                next_node = std::make_shared<ngraph::op::v1::Multiply>(next_node, coeff, ngraph::op::AutoBroadcastType::NUMPY);
+                auto coeff = std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape{1}, &coeffs[i]);
+                next_node = std::make_shared<ov::op::v1::Multiply>(next_node, coeff, ov::op::AutoBroadcastType::NUMPY);
             }
             switch (op) {
-                case SUM:  curr_node = std::make_shared<ngraph::op::v1::Add>(curr_node, next_node); break;
-                case PROD: curr_node = std::make_shared<ngraph::op::v1::Multiply>(curr_node, next_node); break;
-                case DIV:  curr_node = std::make_shared<ngraph::op::v1::Divide>(curr_node, next_node); break;
-                case MAX:  curr_node = std::make_shared<ngraph::op::v1::Maximum>(curr_node, next_node); break;
+                case SUM:  res = std::make_shared<ov::op::v1::Add>(curr_node, next_node); break;
+                case PROD: res = std::make_shared<ov::op::v1::Multiply>(curr_node, next_node); break;
+                case DIV:  res = std::make_shared<ov::op::v1::Divide>(curr_node, next_node); break;
+                case MAX:  res = std::make_shared<ov::op::v1::Maximum>(curr_node, next_node); break;
+                case MIN:  res = std::make_shared<ov::op::v1::Minimum>(curr_node, next_node); break;
                 default: CV_Error(Error::StsNotImplemented, "Unsupported eltwise operation");
             }
+            curr_node = res;
         }
-        return Ptr<BackendNode>(new InfEngineNgraphNode(curr_node));
+        return Ptr<BackendNode>(new InfEngineNgraphNode(res));
     }
 #endif  // HAVE_DNN_NGRAPH
 
     virtual bool tryQuantize(const std::vector<std::vector<float> > &scales,
                              const std::vector<std::vector<int> > &zeropoints, LayerParams& params) CV_OVERRIDE
     {
+        params.set("input_scales", DictValue::arrayReal(scales[0].data(), scales[0].size()));
+        params.set("input_zeropoints", DictValue::arrayInt(zeropoints[0].data(), zeropoints[0].size()));
         if (op == SUM)
         {
             std::vector<float> newCoeffs;
@@ -889,7 +952,6 @@ public:
             newCoeffs[0] /= scales[1][0];
             params.set("coeff", DictValue::arrayReal(newCoeffs.data(), newCoeffs.size()));
             params.set("offset", zeropoints[1][0]);
-            params.set("input_zeropoints", DictValue::arrayInt(zeropoints[0].data(), zeropoints[0].size()));
             return true;
         }
         return op == MAX;

@@ -13,10 +13,15 @@
 #endif
 #include <sstream>
 
+#if defined(HAVE_MFX) && defined(HAVE_ONEVPL)
+#undef HAVE_MFX  // libav's hwcontext_qsv.h doesn't expect oneVPL headers
+#endif
+
 #ifdef HAVE_D3D11
 #define D3D11_NO_HELPERS
 #include <d3d11.h>
 #include <codecvt>
+#include <locale>
 #include "opencv2/core/directx.hpp"
 #ifdef HAVE_OPENCL
 #include <CL/cl_d3d11.h>
@@ -52,6 +57,9 @@ extern "C" {
 #ifdef HAVE_MFX // dependency only on MFX header files, no linkage dependency
 #include <libavutil/hwcontext_qsv.h>
 #endif
+#ifdef HAVE_DRM
+#include <libavutil/hwcontext_drm.h>
+#endif
 }
 
 #define HW_DEFAULT_POOL_SIZE    32
@@ -76,6 +84,7 @@ const char* getVideoAccelerationName(VideoAccelerationType va_type)
     case VIDEO_ACCELERATION_D3D11: return "d3d11";
     case VIDEO_ACCELERATION_VAAPI: return "vaapi";
     case VIDEO_ACCELERATION_MFX: return "mfx";
+    case VIDEO_ACCELERATION_DRM : return "drm";
     }
     return "unknown";
 }
@@ -114,6 +123,7 @@ std::string getDecoderConfiguration(VideoAccelerationType va_type, AVDictionary 
     case VIDEO_ACCELERATION_D3D11: return "";
     case VIDEO_ACCELERATION_VAAPI: return "vaapi.iHD";
     case VIDEO_ACCELERATION_MFX: return "qsv.iHD";
+    case VIDEO_ACCELERATION_DRM: return "drm";
     }
     return "";
 #endif
@@ -153,6 +163,8 @@ std::string getEncoderConfiguration(VideoAccelerationType va_type, AVDictionary 
     case VIDEO_ACCELERATION_D3D11: return "";
     case VIDEO_ACCELERATION_VAAPI: return "vaapi.iHD";
     case VIDEO_ACCELERATION_MFX: return "qsv.iHD";
+    case VIDEO_ACCELERATION_DRM: return "";
+    // Raspberry Pi 5 has no encoders, so we don't support it
     }
     return "unknown";
 #endif
@@ -229,6 +241,18 @@ bool hw_check_device(AVBufferRef* ctx, AVHWDeviceType hw_type, const std::string
                 adapter->Release();
             }
             dxgiDevice->Release();
+        }
+    }
+#endif
+#if defined(HAVE_DRM)
+    if (hw_device_ctx->type == AV_HWDEVICE_TYPE_DRM) {
+        AVDRMDeviceContext *drm_ctx = (AVDRMDeviceContext *)hw_device_ctx->hwctx;
+        if (drm_ctx->fd >= 0) {
+            drmVersionPtr drm_version = drmGetVersion(drm_ctx->fd);
+            if (drm_version) {
+                device_name = drm_version->name;
+                drmFreeVersion(drm_version);
+            }
         }
     }
 #endif
@@ -903,6 +927,7 @@ VideoAccelerationType hw_type_to_va_type(AVHWDeviceType hw_type) {
             { AV_HWDEVICE_TYPE_VAAPI, VIDEO_ACCELERATION_VAAPI },
             { AV_HWDEVICE_TYPE_QSV, VIDEO_ACCELERATION_MFX },
             { AV_HWDEVICE_TYPE_CUDA, (VideoAccelerationType)(1 << 11) },
+            { AV_HWDEVICE_TYPE_DRM, VIDEO_ACCELERATION_DRM }
     };
     for (const HWTypeFFMPEG& hw : known_hw_types) {
         if (hw_type == hw.hw_type)

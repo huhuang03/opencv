@@ -2,7 +2,7 @@
 // It is subject to the license terms in the LICENSE file found in the top-level directory
 // of this distribution and at http://opencv.org/license.html.
 //
-// Copyright (C) 2018 Intel Corporation
+// Copyright (C) 2018-2021 Intel Corporation
 
 
 #ifndef OPENCV_GAPI_GSTREAMING_COMPILED_HPP
@@ -65,6 +65,7 @@ using OptionalOpaqueRef = OptRef<cv::detail::OpaqueRef>;
 using GOptRunArgP = util::variant<
     optional<cv::Mat>*,
     optional<cv::RMat>*,
+    optional<cv::MediaFrame>*,
     optional<cv::Scalar>*,
     cv::detail::OptionalVectorRef,
     cv::detail::OptionalOpaqueRef
@@ -74,6 +75,7 @@ using GOptRunArgsP = std::vector<GOptRunArgP>;
 using GOptRunArg = util::variant<
     optional<cv::Mat>,
     optional<cv::RMat>,
+    optional<cv::MediaFrame>,
     optional<cv::Scalar>,
     optional<cv::detail::VectorRef>,
     optional<cv::detail::OpaqueRef>
@@ -93,6 +95,14 @@ template<typename T> inline GOptRunArgP wrap_opt_arg(optional<std::vector<T> >& 
 
 template<> inline GOptRunArgP wrap_opt_arg(optional<cv::Mat> &m) {
     return GOptRunArgP{&m};
+}
+
+template<> inline GOptRunArgP wrap_opt_arg(optional<cv::RMat> &m) {
+    return GOptRunArgP{&m};
+}
+
+template<> inline GOptRunArgP wrap_opt_arg(optional<cv::MediaFrame> &f) {
+    return GOptRunArgP{&f};
 }
 
 template<> inline GOptRunArgP wrap_opt_arg(optional<cv::Scalar> &s) {
@@ -215,7 +225,7 @@ public:
      * setSource() to run the graph on a new video stream.
      *
      * @overload
-     * @param args arguments used to contruct and initialize a stream
+     * @param args arguments used to construct and initialize a stream
      * source.
      */
     template<typename T, typename... Args>
@@ -378,7 +388,6 @@ protected:
     /// @private
     std::shared_ptr<Priv> m_priv;
 };
-/** @} */
 
 namespace gapi {
 
@@ -399,11 +408,10 @@ namespace streaming {
 struct GAPI_EXPORTS_W_SIMPLE queue_capacity
 {
     GAPI_WRAP
-    explicit queue_capacity(size_t cap = 1) : capacity(cap) { };
+    explicit queue_capacity(size_t cap = 1) : capacity(cap) { }
     GAPI_PROP_RW
     size_t capacity;
 };
-/** @} */
 } // namespace streaming
 } // namespace gapi
 
@@ -414,6 +422,8 @@ template<> struct CompileArgTag<cv::gapi::streaming::queue_capacity>
     static const char* tag() { return "gapi.queue_capacity"; }
 };
 }
+
+/** @} gapi_main_classes */
 
 }
 

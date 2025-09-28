@@ -131,7 +131,15 @@ static void generateCentersPP(const Mat& data, Mat& _out_centers,
                           KMeansPPDistanceComputer(tdist2, data, dist, ci),
                           (double)divUp((size_t)(dims * N), CV_KMEANS_PARALLEL_GRANULARITY));
             double s = 0;
-            for (int i = 0; i < N; i++)
+            int i = 0;
+        #if CV_ENABLE_UNROLLED
+            for (; i + 7 < N; i += 8)
+            {
+                s += tdist2[i + 0] + tdist2[i + 1] + tdist2[i + 2] + tdist2[i + 3] +
+                     tdist2[i + 4] + tdist2[i + 5] + tdist2[i + 6] + tdist2[i + 7];
+            }
+        #endif
+            for (; i < N; i++)
             {
                 s += tdist2[i];
             }
@@ -240,7 +248,7 @@ double cv::kmeans( InputArray _data, int K,
 
     attempts = std::max(attempts, 1);
     CV_Assert( data0.dims <= 2 && type == CV_32F && K > 0 );
-    CV_CheckGE(N, K, "Number of clusters should be more than number of elements");
+    CV_CheckGE(N, K, "There can't be more clusters than elements");
 
     Mat data(N, dims, CV_32F, data0.ptr(), isrow ? dims * sizeof(float) : static_cast<size_t>(data0.step));
 

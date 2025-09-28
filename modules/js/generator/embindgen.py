@@ -76,6 +76,7 @@ if sys.version_info[0] >= 3:
 else:
     from cStringIO import StringIO
 
+import json
 
 func_table = {}
 
@@ -103,10 +104,35 @@ def makeWhiteList(module_list):
                 wl[k] = m[k]
     return wl
 
+def makeWhiteListJson(module_list):
+    wl = {}
+    for n, gen_dict in module_list.items():
+        m = gen_dict["whitelist"]
+        for k in m.keys():
+            if k in wl:
+                wl[k] += m[k]
+            else:
+                wl[k] = m[k]
+    return wl
+
+def makeNamespacePrefixOverride(module_list):
+    wl = {}
+    for n, gen_dict in module_list.items():
+        if "namespace_prefix_override" in gen_dict:
+            m = gen_dict["namespace_prefix_override"]
+            for k in m.keys():
+                if k in wl:
+                    wl[k] += m[k]
+                else:
+                    wl[k] = m[k]
+    return wl
+
+
 white_list = None
+namespace_prefix_override = None
 
 # Features to be exported
-export_enums = False
+export_enums = True
 export_consts = True
 with_wrapped_functions = True
 with_default_params = True
@@ -222,16 +248,17 @@ class ArgInfo(object):
                 self.const = True
             elif m == "/Ref":
                 self.reference = True
-        if self.tp == "Mat":
-            if self.outputarg:
-                self.tp = "cv::Mat&"
-            elif self.inputarg:
-                self.tp = "const cv::Mat&"
-        if self.tp == "vector_Mat":
-            if self.outputarg:
-                self.tp = "std::vector<cv::Mat>&"
-            elif self.inputarg:
-                self.tp = "const std::vector<cv::Mat>&"
+        if self.tp == "Mat" and (self.inputarg or self.outputarg):
+            self.tp = "cv::Mat&"
+            if self.inputarg and not self.outputarg:
+                self.const = True
+        if self.tp == "vector_Mat" and (self.inputarg or self.outputarg):
+            self.tp = "std::vector<cv::Mat>&"
+            if self.reference and not self.const:
+                self.inputarg = False
+                self.outputarg = True
+            elif self.inputarg and not self.outputarg:
+                self.const = True
         self.tp = handle_vector(self.tp).strip()
         if self.const:
             self.tp = "const " + self.tp
@@ -271,6 +298,8 @@ class FuncVariant(object):
 
 class FuncInfo(object):
     def __init__(self, class_name, name, cname, namespace, isconstructor):
+        self.name_id = '_'.join([namespace] + ([class_name] if class_name else []) + [name])  # unique id for dict key
+
         self.class_name = class_name
         self.name = name
         self.cname = cname
@@ -290,17 +319,41 @@ class Namespace(object):
 
 
 class JSWrapperGenerator(object):
-    def __init__(self):
-
+    def __init__(self, preprocessor_definitions=None):
         self.bindings = []
         self.wrapper_funcs = []
 
-        self.classes = {}
+        self.classes = {}  # FIXIT 'classes' should belong to 'namespaces'
         self.namespaces = {}
-        self.enums = {}
+        self.enums = {}  # FIXIT 'enums' should belong to 'namespaces'
 
-        self.parser = hdr_parser.CppHeaderParser()
+        self.parser = hdr_parser.CppHeaderParser(
+            preprocessor_definitions=preprocessor_definitions
+        )
         self.class_idx = 0
+
+    def _is_string_type(self, tp: str) -> bool:
+        """Check if a type should be treated as string in bindings."""
+        string_types = {
+            "std::string",
+            "char",
+            "signed char",
+            "unsigned char",
+        }
+        return tp in string_types
+
+    def _generate_class_properties(self, class_info, class_bindings):
+        # Generate bindings for properties
+        for prop in class_info.props:
+            if prop.tp in type_dict and not self._is_string_type(prop.tp):
+                _class_property = class_property_enum_template
+            else:
+                _class_property = class_property_template
+
+            class_bindings.append(_class_property.substitute(
+                js_name=prop.name,
+                cpp_name='::'.join([class_info.cname, prop.name])
+            ))
 
     def add_class(self, stype, name, decl):
         class_info = ClassInfo(name, decl)
@@ -313,19 +366,31 @@ class JSWrapperGenerator(object):
             sys.exit(-1)
         self.classes[class_info.name] = class_info
 
-        if class_info.bases:
-            chunks = class_info.bases[0].split('::')
-            base = '_'.join(chunks)
-            while base not in self.classes and len(chunks) > 1:
-                del chunks[-2]
+    def resolve_class_inheritance(self):
+        new_classes = {}
+        for name, class_info in self.classes.items():
+
+            if not hasattr(class_info, 'bases'):
+                new_classes[name] = class_info
+                continue # not class
+
+            if class_info.bases:
+                chunks = class_info.bases[0].split('::')
                 base = '_'.join(chunks)
-            if base not in self.classes:
-                print("Generator error: unable to resolve base %s for %s"
-                      % (class_info.bases[0], class_info.name))
-                sys.exit(-1)
-            else:
-                class_info.bases[0] = "::".join(chunks)
-                class_info.isalgorithm |= self.classes[base].isalgorithm
+                while base not in self.classes and len(chunks) > 1:
+                    del chunks[-2]
+                    base = '_'.join(chunks)
+                if base not in self.classes:
+                    print("Generator error: unable to resolve base %s for %s"
+                        % (class_info.bases[0], class_info.name))
+                    sys.exit(-1)
+                else:
+                    class_info.bases[0] = "::".join(chunks)
+                    class_info.isalgorithm |= self.classes[base].isalgorithm
+
+            new_classes[name] = class_info
+
+        self.classes = new_classes
 
     def split_decl_name(self, name):
         chunks = name.split('.')
@@ -419,7 +484,8 @@ class JSWrapperGenerator(object):
         else:
             func_map = self.namespaces.setdefault(namespace, Namespace()).funcs
 
-        func = func_map.setdefault(name, FuncInfo(class_name, name, cpp_name, namespace, is_constructor))
+        fi = FuncInfo(class_name, name, cpp_name, namespace, is_constructor)
+        func = func_map.setdefault(fi.name_id, fi)
 
         variant = FuncVariant(class_name, name, decl, is_constructor, is_class_method, is_const_method,
                         is_virtual_method, is_pure_virtual_method, ref_return, const_return)
@@ -430,7 +496,7 @@ class JSWrapperGenerator(object):
         f.write(buf.getvalue())
         f.close()
 
-    def gen_function_binding_with_wrapper(self, func, class_info):
+    def gen_function_binding_with_wrapper(self, func, ns_name, class_info):
 
         binding_text = None
         wrapper_func_text = None
@@ -463,7 +529,7 @@ class JSWrapperGenerator(object):
                     ret_type = type_dict[ptr_type]
             for key in type_dict:
                 if key in ret_type:
-                    ret_type = re.sub('(^|[^\w])' + key + '($|[^\w])', type_dict[key], ret_type)
+                    ret_type = re.sub(r"\b" + key + r"\b", type_dict[key], ret_type)
             arg_types = []
             unwrapped_arg_types = []
             for arg in variant.args:
@@ -478,7 +544,7 @@ class JSWrapperGenerator(object):
                 arg_types.append(arg_type)
                 unwrapped_arg_types.append(arg_type)
 
-            # Function attribure
+            # Function attribute
             func_attribs = ''
             if '*' in ''.join(arg_types):
                 func_attribs += ', allow_raw_pointers()'
@@ -488,8 +554,23 @@ class JSWrapperGenerator(object):
 
 
             # Wrapper function
-            wrap_func_name = (func.class_name+"_" if class_info != None else "") + func.name.split("::")[-1] + "_wrapper"
-            js_func_name = func.name
+            if ns_name != None and ns_name != "cv":
+                ns_parts = ns_name.split(".")
+                if ns_parts[0] == "cv":
+                    ns_parts = ns_parts[1:]
+                ns_part = "_".join(ns_parts) + "_"
+                ns_id = '_'.join(ns_parts)
+                ns_prefix = namespace_prefix_override.get(ns_id, ns_id)
+                if ns_prefix:
+                    ns_prefix = ns_prefix + '_'
+            else:
+                ns_prefix = ''
+            if class_info == None:
+                js_func_name = ns_prefix + func.name
+                wrap_func_name = js_func_name + "_wrapper"
+            else:
+                wrap_func_name = ns_prefix + func.class_name + "_" + func.name + "_wrapper"
+                js_func_name = func.name
 
             # TODO: Name functions based wrap directives or based on arguments list
             if index > 0:
@@ -636,7 +717,7 @@ class JSWrapperGenerator(object):
                     # Replace types. Instead of ret_type.replace we use regular
                     # expression to exclude false matches.
                     # See https://github.com/opencv/opencv/issues/15514
-                    ret_type = re.sub('(^|[^\w])' + key + '($|[^\w])', type_dict[key], ret_type)
+                    ret_type = re.sub(r"\b" + key + r"\b", type_dict[key], ret_type)
             if variant.constret and ret_type.startswith('const') == False:
                 ret_type = 'const ' + ret_type
             if variant.refret and ret_type.endswith('&') == False:
@@ -658,7 +739,7 @@ class JSWrapperGenerator(object):
                     def_args.append(arg.defval)
                 arg_types.append(orig_arg_types[-1])
 
-            # Function attribure
+            # Function attribute
             func_attribs = ''
             if '*' in ''.join(orig_arg_types):
                 func_attribs += ', allow_raw_pointers()'
@@ -737,15 +818,27 @@ class JSWrapperGenerator(object):
                 else:  # class/global function
                     self.add_func(decl)
 
+        self.resolve_class_inheritance()
+
         # step 2: generate bindings
         # Global functions
         for ns_name, ns in sorted(self.namespaces.items()):
-            if ns_name.split('.')[0] != 'cv':
+            ns_parts = ns_name.split('.')
+            if ns_parts[0] != 'cv':
+                print('Ignore namespace: {}'.format(ns_name))
                 continue
-            for name, func in sorted(ns.funcs.items()):
+            else:
+                ns_parts = ns_parts[1:]
+            ns_id = '_'.join(ns_parts)
+            ns_prefix = namespace_prefix_override.get(ns_id, ns_id)
+            for name_id, func in sorted(ns.funcs.items()):
+                name = func.name
+                if ns_prefix:
+                    name = ns_prefix + '_' + name
                 if name in ignore_list:
                     continue
                 if not name in white_list['']:
+                    #print('Not in whitelist: "{}" from ns={}'.format(name, ns_name))
                     continue
 
                 ext_cnst = False
@@ -769,7 +862,7 @@ class JSWrapperGenerator(object):
                     continue
 
                 if with_wrapped_functions:
-                    binding, wrapper = self.gen_function_binding_with_wrapper(func, class_info=None)
+                    binding, wrapper = self.gen_function_binding_with_wrapper(func, ns_name, class_info=None)
                     self.bindings += binding
                     self.wrapper_funcs += wrapper
                 else:
@@ -780,6 +873,7 @@ class JSWrapperGenerator(object):
         for name, class_info in sorted(self.classes.items()):
             class_bindings = []
             if not name in white_list:
+                #print('Not in whitelist: "{}" from ns={}'.format(name, ns_name))
                 continue
 
             # Generate bindings for methods
@@ -787,6 +881,7 @@ class JSWrapperGenerator(object):
                 if method.cname in ignore_list:
                     continue
                 if not method.name in white_list[method.class_name]:
+                    #print('Not in whitelist: "{}"'.format(method.name))
                     continue
                 if method.is_constructor:
                     for variant in method.variants:
@@ -802,7 +897,7 @@ class JSWrapperGenerator(object):
                         class_bindings.append(constructor_template.substitute(signature=', '.join(args)))
                 else:
                     if with_wrapped_functions and (len(method.variants) > 1 or len(method.variants[0].args)>0 or "String" in method.variants[0].rettype):
-                        binding, wrapper = self.gen_function_binding_with_wrapper(method, class_info=class_info)
+                        binding, wrapper = self.gen_function_binding_with_wrapper(method, None, class_info=class_info)
                         self.wrapper_funcs = self.wrapper_funcs + wrapper
                         class_bindings = class_bindings + binding
                     else:
@@ -820,11 +915,17 @@ class JSWrapperGenerator(object):
 
 
 
-            # Generate bindings for properties
-            for property in class_info.props:
-                _class_property = class_property_enum_template if property.tp in type_dict else class_property_template
-                class_bindings.append(_class_property.substitute(js_name=property.name, cpp_name='::'.join(
-                    [class_info.cname, property.name])))
+            # Generate bindings for properties(prop)
+            for prop in class_info.props:
+                if prop.tp in type_dict and not self._is_string_type(prop.tp):
+                    _class_property = class_property_enum_template
+                else:
+                    _class_property = class_property_template
+
+                class_bindings.append(_class_property.substitute(
+                    js_name=prop.name,
+                    cpp_name='::'.join([class_info.cname, prop.name])
+                ))
 
             dv = ''
             base = Template("""base<$base>""")
@@ -846,7 +947,7 @@ class JSWrapperGenerator(object):
                 if ns_name.split('.')[0] != 'cv':
                     continue
                 for name, enum in sorted(ns.enums.items()):
-                    if not name.endswith('.anonymous'):
+                    if '.unnamed_' not in name:
                         name = name.replace("cv.", "")
                         enum_values = []
                         for enum_val in enum:
@@ -866,7 +967,10 @@ class JSWrapperGenerator(object):
             for ns_name, ns in sorted(self.namespaces.items()):
                 if ns_name.split('.')[0] != 'cv':
                     continue
+                # TODO CALIB_FIX_FOCAL_LENGTH is defined both in cv:: and cv::fisheye
+                prefix = 'FISHEYE_' if 'fisheye' in ns_name else ''
                 for name, const in sorted(ns.consts.items()):
+                    name = prefix + name
                     # print("Gen consts: ", name, const)
                     self.bindings.append(const_template.substitute(js_name=name, value=const))
 
@@ -888,26 +992,69 @@ class JSWrapperGenerator(object):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 5:
-        print("Usage:\n", \
-            os.path.basename(sys.argv[0]), \
-            "<full path to hdr_parser.py> <bindings.cpp> <headers.txt> <core_bindings.cpp> <opencv_js.config.py>")
-        print("Current args are: ", ", ".join(["'"+a+"'" for a in sys.argv]))
-        exit(0)
+    import argparse
 
-    dstdir = "."
-    hdr_parser_path = os.path.abspath(sys.argv[1])
+    arg_parser = argparse.ArgumentParser(
+        description="OpenCV JavaScript bindings generator"
+    )
+    arg_parser.add_argument(
+        "-p", "--parser",
+        required=True,
+        help="Full path to OpenCV header parser `hdr_parser.py`"
+    )
+    arg_parser.add_argument(
+        "-o", "--output_file",
+        dest="output_file_path",
+        required=True,
+        help="Path to output file containing js bindings"
+    )
+    arg_parser.add_argument(
+        "-c", "--config",
+        dest="config_json_path",
+        required=True,
+        help="Path to generator configuration file in .json format"
+    )
+    arg_parser.add_argument(
+        "--whitelist",
+        dest="whitelist_file_path",
+        required=True,
+        help="Path to whitelist.js or opencv_js.config.py"
+    )
+    args = arg_parser.parse_args()
+
+    # import header parser
+    hdr_parser_path = os.path.abspath(args.parser)
     if hdr_parser_path.endswith(".py"):
         hdr_parser_path = os.path.dirname(hdr_parser_path)
     sys.path.append(hdr_parser_path)
     import hdr_parser
 
-    bindingsCpp = sys.argv[2]
-    headers = open(sys.argv[3], 'r').read().split(';')
-    coreBindings = sys.argv[4]
-    whiteListFile = sys.argv[5]
-    exec(open(whiteListFile).read())
-    assert(white_list)
+    with open(args.config_json_path, "r") as fh:
+        config_json = json.load(fh)
+    headers = config_json.get("headers", ())
 
-    generator = JSWrapperGenerator()
-    generator.gen(bindingsCpp, headers, coreBindings)
+    bindings_cpp = args.output_file_path
+    core_bindings_path = config_json["core_bindings_file_path"]
+    whitelist_file_path = args.whitelist_file_path
+
+    if whitelist_file_path.endswith(".json") or whitelist_file_path.endswith(".JSON"):
+        with open(whitelist_file_path) as f:
+            gen_dict = json.load(f)
+        white_list = makeWhiteListJson(gen_dict)
+        namespace_prefix_override = makeNamespacePrefixOverride(gen_dict)
+    elif whitelist_file_path.endswith(".py") or whitelist_file_path.endswith(".PY"):
+        with open(whitelist_file_path) as fh:
+            exec(fh.read())
+        assert white_list
+        namespace_prefix_override = {
+            'dnn' : '',
+            'aruco' : '',
+        }
+    else:
+        print("Unexpected format of OpenCV config file", whitelist_file_path)
+        exit(1)
+
+    generator = JSWrapperGenerator(
+        preprocessor_definitions=config_json.get("preprocessor_definitions", None)
+    )
+    generator.gen(bindings_cpp, headers, core_bindings_path)

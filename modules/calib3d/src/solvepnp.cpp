@@ -48,7 +48,6 @@
 #include "ap3p.h"
 #include "ippe.hpp"
 #include "sqpnp.hpp"
-#include "calib3d_c_api.h"
 
 #include "usac.hpp"
 
@@ -56,7 +55,7 @@
 
 namespace cv
 {
-#if defined _DEBUG || defined CV_STATIC_ANALYSIS
+#if !defined(NDEBUG) || defined(CV_STATIC_ANALYSIS)
 static bool isPlanarObjectPoints(InputArray _objectPoints, double threshold)
 {
     CV_CheckType(_objectPoints.type(), _objectPoints.type() == CV_32FC3 || _objectPoints.type() == CV_64FC3,
@@ -99,17 +98,30 @@ void drawFrameAxes(InputOutputArray image, InputArray cameraMatrix, InputArray d
     CV_CheckType(type, cn == 1 || cn == 3 || cn == 4,
                  "Number of channels must be 1, 3 or 4" );
 
-    CV_Assert(image.getMat().total() > 0);
+    cv::Mat img = image.getMat();
+    CV_Assert(img.total() > 0);
     CV_Assert(length > 0);
 
     // project axes points
-    vector<Point3f> axesPoints;
+    std::vector<Point3f> axesPoints;
     axesPoints.push_back(Point3f(0, 0, 0));
     axesPoints.push_back(Point3f(length, 0, 0));
     axesPoints.push_back(Point3f(0, length, 0));
     axesPoints.push_back(Point3f(0, 0, length));
-    vector<Point2f> imagePoints;
+    std::vector<Point2f> imagePoints;
     projectPoints(axesPoints, rvec, tvec, cameraMatrix, distCoeffs, imagePoints);
+
+    cv::Rect imageRect(0, 0, img.cols, img.rows);
+    bool allIn = true;
+    for (size_t i = 0; i < imagePoints.size(); i++)
+    {
+        allIn &= imageRect.contains(imagePoints[i]);
+    }
+
+    if (!allIn)
+    {
+        CV_LOG_WARNING(NULL, "Some of projected axes endpoints are out of frame. The drawn axes may be not reliable.");
+    }
 
     // draw axes lines
     line(image, imagePoints[0], imagePoints[1], Scalar(0, 0, 255), thickness);
@@ -123,7 +135,7 @@ bool solvePnP( InputArray opoints, InputArray ipoints,
 {
     CV_INSTRUMENT_REGION();
 
-    vector<Mat> rvecs, tvecs;
+    std::vector<Mat> rvecs, tvecs;
     int solutions = solvePnPGeneric(opoints, ipoints, cameraMatrix, distCoeffs, rvecs, tvecs, useExtrinsicGuess, (SolvePnPMethod)flags, rvec, tvec);
 
     if (solutions > 0)
@@ -152,12 +164,13 @@ public:
     int runKernel( InputArray _m1, InputArray _m2, OutputArray _model ) const CV_OVERRIDE
     {
         Mat opoints = _m1.getMat(), ipoints = _m2.getMat();
-
+        Mat iter_rvec = rvec.clone();
+        Mat iter_tvec = tvec.clone();
         bool correspondence = solvePnP( _m1, _m2, cameraMatrix, distCoeffs,
-                                            rvec, tvec, useExtrinsicGuess, flags );
+                                            iter_rvec, iter_tvec, useExtrinsicGuess, flags );
 
         Mat _local_model;
-        hconcat(rvec, tvec, _local_model);
+        hconcat(iter_rvec, iter_tvec, _local_model);
         _local_model.copyTo(_model);
 
         return correspondence;
@@ -197,21 +210,6 @@ public:
     Mat rvec;
     Mat tvec;
 };
-
-UsacParams::UsacParams()
-{
-    confidence = 0.99;
-    isParallel = false;
-    loIterations = 5;
-    loMethod = LocalOptimMethod::LOCAL_OPTIM_INNER_LO;
-    loSampleSize = 14;
-    maxIterations = 5000;
-    neighborsSearch = NeighborSearchMethod::NEIGH_GRID;
-    randomGeneratorState = 0;
-    sampler = SamplingMethod::SAMPLING_UNIFORM;
-    score = ScoreMethod::SCORE_METHOD_MSAC;
-    threshold = 1.5;
-}
 
 bool solvePnPRansac(InputArray _opoints, InputArray _ipoints,
                     InputArray _cameraMatrix, InputArray _distCoeffs,
@@ -321,8 +319,8 @@ bool solvePnPRansac(InputArray _opoints, InputArray _ipoints,
         return false;
     }
 
-    vector<Point3d> opoints_inliers;
-    vector<Point2d> ipoints_inliers;
+    std::vector<Point3d> opoints_inliers;
+    std::vector<Point2d> ipoints_inliers;
     opoints = opoints.reshape(3);
     ipoints = ipoints.reshape(2);
     opoints.convertTo(opoints_inliers, CV_64F);
@@ -336,7 +334,13 @@ bool solvePnPRansac(InputArray _opoints, InputArray _ipoints,
     ipoints_inliers.resize(npoints1);
     try
     {
-        result = solvePnP(opoints_inliers, ipoints_inliers, cameraMatrix,
+       if (flags == SOLVEPNP_ITERATIVE && !useExtrinsicGuess)
+       {
+          rvec = _local_model.col(0).clone();
+          tvec = _local_model.col(1).clone();
+          useExtrinsicGuess = true;
+       }
+       result = solvePnP(opoints_inliers, ipoints_inliers, cameraMatrix,
                           distCoeffs, rvec, tvec, useExtrinsicGuess,
                           (flags == SOLVEPNP_P3P || flags == SOLVEPNP_AP3P) ? SOLVEPNP_EPNP : flags) ? 1 : -1;
     }
@@ -400,7 +404,7 @@ bool solvePnPRansac( InputArray objectPoints, InputArray imagePoints,
     usac::setParameters(model_params, cameraMatrix.empty() ? usac::EstimationMethod::P6P :
         usac::EstimationMethod::P3P, params, inliers.needed());
     Ptr<usac::RansacOutput> ransac_output;
-    if (usac::run(model_params, imagePoints, objectPoints, model_params->getRandomGeneratorState(),
+    if (usac::run(model_params, imagePoints, objectPoints,
             ransac_output, cameraMatrix, noArray(), distCoeffs, noArray())) {
         if (inliers.needed()) {
             const auto &inliers_mask = ransac_output->getInliersMask();
@@ -472,7 +476,7 @@ int solveP3P( InputArray _opoints, InputArray _ipoints,
     else
         imgPts = imgPts.reshape(1, 2*imgPts.rows);
 
-    vector<double> reproj_errors(solutions);
+    std::vector<double> reproj_errors(solutions);
     for (size_t i = 0; i < reproj_errors.size(); i++)
     {
         Mat rvec;
@@ -762,7 +766,7 @@ static void solvePnPRefine(InputArray _objectPoints, InputArray _imagePoints,
         rvec0.convertTo(rvec, CV_64F);
         tvec0.convertTo(tvec, CV_64F);
 
-        vector<Point2d> ipoints_normalized;
+        std::vector<Point2d> ipoints_normalized;
         undistortPoints(ipoints, ipoints_normalized, cameraMatrix, distCoeffs);
         Mat sd = Mat(ipoints_normalized).reshape(1, npoints*2);
         Mat objectPoints0 = opoints.reshape(1, npoints);
@@ -856,7 +860,7 @@ int solvePnPGeneric( InputArray _opoints, InputArray _ipoints,
     Mat cameraMatrix = Mat_<double>(cameraMatrix0);
     Mat distCoeffs = Mat_<double>(distCoeffs0);
 
-    vector<Mat> vec_rvecs, vec_tvecs;
+    std::vector<Mat> vec_rvecs, vec_tvecs;
     if (flags == SOLVEPNP_EPNP || flags == SOLVEPNP_DLS || flags == SOLVEPNP_UPNP)
     {
         if (flags == SOLVEPNP_DLS)
@@ -881,7 +885,7 @@ int solvePnPGeneric( InputArray _opoints, InputArray _ipoints,
     }
     else if (flags == SOLVEPNP_P3P || flags == SOLVEPNP_AP3P)
     {
-        vector<Mat> rvecs, tvecs;
+        std::vector<Mat> rvecs, tvecs;
         solveP3P(opoints, ipoints, _cameraMatrix, _distCoeffs, rvecs, tvecs, flags);
         vec_rvecs.insert(vec_rvecs.end(), rvecs.begin(), rvecs.end());
         vec_tvecs.insert(vec_tvecs.end(), tvecs.begin(), tvecs.end());
@@ -900,12 +904,7 @@ int solvePnPGeneric( InputArray _opoints, InputArray _ipoints,
             tvec.create(3, 1, CV_64FC1);
         }
 
-        CvMat c_objectPoints = cvMat(opoints), c_imagePoints = cvMat(ipoints);
-        CvMat c_cameraMatrix = cvMat(cameraMatrix), c_distCoeffs = cvMat(distCoeffs);
-        CvMat c_rvec = cvMat(rvec), c_tvec = cvMat(tvec);
-        cvFindExtrinsicCameraParams2(&c_objectPoints, &c_imagePoints, &c_cameraMatrix,
-                                     (c_distCoeffs.rows && c_distCoeffs.cols) ? &c_distCoeffs : 0,
-                                     &c_rvec, &c_tvec, useExtrinsicGuess );
+        findExtrinsicCameraParams2(opoints, ipoints, cameraMatrix, distCoeffs, rvec, tvec, useExtrinsicGuess);
 
         vec_rvecs.push_back(rvec);
         vec_tvecs.push_back(tvec);
@@ -946,7 +945,7 @@ int solvePnPGeneric( InputArray _opoints, InputArray _ipoints,
     {
         CV_Assert(npoints == 4);
 
-#if defined _DEBUG || defined CV_STATIC_ANALYSIS
+#if !defined(NDEBUG) || defined(CV_STATIC_ANALYSIS)
         double Xs[4][3];
         if (opoints.depth() == CV_32F)
         {
@@ -1049,7 +1048,7 @@ int solvePnPGeneric( InputArray _opoints, InputArray _ipoints,
         vec_tvecs.push_back(tvec);
     }*/
     else
-        CV_Error(CV_StsBadArg, "The flags argument must be one of SOLVEPNP_ITERATIVE, SOLVEPNP_P3P, "
+        CV_Error(cv::Error::StsBadArg, "The flags argument must be one of SOLVEPNP_ITERATIVE, SOLVEPNP_P3P, "
             "SOLVEPNP_EPNP, SOLVEPNP_DLS, SOLVEPNP_UPNP, SOLVEPNP_AP3P, SOLVEPNP_IPPE, SOLVEPNP_IPPE_SQUARE or SOLVEPNP_SQPNP");
 
     CV_Assert(vec_rvecs.size() == vec_tvecs.size());
@@ -1134,7 +1133,7 @@ int solvePnPGeneric( InputArray _opoints, InputArray _ipoints,
 
         for (size_t i = 0; i < vec_rvecs.size(); i++)
         {
-            vector<Point2d> projectedPoints;
+            std::vector<Point2d> projectedPoints;
             projectPoints(objectPoints, vec_rvecs[i], vec_tvecs[i], cameraMatrix, distCoeffs, projectedPoints);
             double rmse = norm(Mat(projectedPoints, false), imagePoints, NORM_L2) / sqrt(2*projectedPoints.size());
 

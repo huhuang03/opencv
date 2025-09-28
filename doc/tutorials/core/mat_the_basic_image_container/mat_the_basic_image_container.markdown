@@ -148,7 +148,7 @@ picture in memory.
 Creating a Mat object explicitly
 ----------------------------------
 
-In the @ref tutorial_load_save_image tutorial you have already learned how to write a matrix to an image
+In the @ref tutorial_display_image tutorial you have already learned how to write a matrix to an image
 file by using the @ref cv::imwrite() function. However, for debugging purposes it's much more
 convenient to see the actual values. You can do this using the \<\< operator of *Mat*. Be aware that
 this only works for two dimensional matrices.
@@ -269,7 +269,7 @@ OpenCV offers support for output of other common OpenCV data structures too via 
     ![](images/MatBasicContainerOut15.png)
 
 Most of the samples here have been included in a small console application. You can download it from
-[here](https://github.com/opencv/opencv/tree/master/samples/cpp/tutorial_code/core/mat_the_basic_image_container/mat_the_basic_image_container.cpp)
+[here](https://github.com/opencv/opencv/tree/4.x/samples/cpp/tutorial_code/core/mat_the_basic_image_container/mat_the_basic_image_container.cpp)
 or in the core section of the cpp samples.
 
 You can also find a quick video demonstration of this on

@@ -5,10 +5,16 @@
 #include "precomp.hpp"
 #include "opencv2/core/bindings_utils.hpp"
 #include <sstream>
+#include <iomanip>
 #include <opencv2/core/utils/filesystem.hpp>
 #include <opencv2/core/utils/filesystem.private.hpp>
 
-namespace cv { namespace utils {
+namespace cv {
+static inline std::ostream& operator<<(std::ostream& os, const Rect& rect)
+{
+    return os << "[x=" << rect.x << ", y=" << rect.y << ", w=" << rect.width << ", h=" << rect.height << ']';
+}
+namespace utils {
 
 String dumpInputArray(InputArray argument)
 {
@@ -50,9 +56,13 @@ String dumpInputArray(InputArray argument)
             ss << " type(-1)=" << cv::typeToString(argument.type(-1));
         } while (0);
     }
+    catch (const std::exception& e)
+    {
+        ss << " ERROR: exception occurred: " << e.what();
+    }
     catch (...)
     {
-        ss << " ERROR: exception occurred, dump is non-complete";  // need to properly support different kinds
+        ss << " ERROR: unknown exception occurred, dump is non-complete";
     }
     return ss.str();
 }
@@ -103,9 +113,13 @@ CV_EXPORTS_W String dumpInputArrayOfArrays(InputArrayOfArrays argument)
             }
         } while (0);
     }
+    catch (const std::exception& e)
+    {
+        ss << " ERROR: exception occurred: " << e.what();
+    }
     catch (...)
     {
-        ss << " ERROR: exception occurred, dump is non-complete";  // need to properly support different kinds
+        ss << " ERROR: unknown exception occurred, dump is non-complete";
     }
     return ss.str();
 }
@@ -150,9 +164,13 @@ CV_EXPORTS_W String dumpInputOutputArray(InputOutputArray argument)
             ss << " type(-1)=" << cv::typeToString(argument.type(-1));
         } while (0);
     }
+    catch (const std::exception& e)
+    {
+        ss << " ERROR: exception occurred: " << e.what();
+    }
     catch (...)
     {
-        ss << " ERROR: exception occurred, dump is non-complete";  // need to properly support different kinds
+        ss << " ERROR: unknown exception occurred, dump is non-complete";
     }
     return ss.str();
 }
@@ -203,12 +221,59 @@ CV_EXPORTS_W String dumpInputOutputArrayOfArrays(InputOutputArrayOfArrays argume
             }
         } while (0);
     }
+    catch (const std::exception& e)
+    {
+        ss << " ERROR: exception occurred: " << e.what();
+    }
     catch (...)
     {
-        ss << " ERROR: exception occurred, dump is non-complete";  // need to properly support different kinds
+        ss << " ERROR: unknown exception occurred, dump is non-complete";
     }
     return ss.str();
 }
+
+template <class T, class Formatter>
+static inline String dumpVector(const std::vector<T>& vec, Formatter format)
+{
+    std::ostringstream oss("[", std::ios::ate);
+    if (!vec.empty())
+    {
+        format(oss) << vec[0];
+        for (std::size_t i = 1; i < vec.size(); ++i)
+        {
+            oss << ", ";
+            format(oss) << vec[i];
+        }
+    }
+    oss << "]";
+    return oss.str();
+}
+
+static inline std::ostream& noFormat(std::ostream& os)
+{
+    return os;
+}
+
+static inline std::ostream& floatFormat(std::ostream& os)
+{
+    return os << std::fixed << std::setprecision(2);
+}
+
+String dumpVectorOfInt(const std::vector<int>& vec)
+{
+    return dumpVector(vec, &noFormat);
+}
+
+String dumpVectorOfDouble(const std::vector<double>& vec)
+{
+    return dumpVector(vec, &floatFormat);
+}
+
+String dumpVectorOfRect(const std::vector<Rect>& vec)
+{
+    return dumpVector(vec, &noFormat);
+}
+
 
 namespace fs {
 cv::String getCacheDirectoryForDownloads()

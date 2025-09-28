@@ -57,10 +57,8 @@ Mat sizeCal(const Mat& w, const Mat& h)
 class TrackerDaSiamRPNImpl : public TrackerDaSiamRPN
 {
 public:
-    TrackerDaSiamRPNImpl(const TrackerDaSiamRPN::Params& parameters)
-        : params(parameters)
+    TrackerDaSiamRPNImpl(const TrackerDaSiamRPN::Params& params)
     {
-
         siamRPN = dnn::readNet(params.model);
         siamKernelCL1 = dnn::readNet(params.kernel_cls1);
         siamKernelR1 = dnn::readNet(params.kernel_r1);
@@ -77,11 +75,20 @@ public:
         siamKernelCL1.setPreferableTarget(params.target);
     }
 
+    TrackerDaSiamRPNImpl(const dnn::Net& siam_rpn, const dnn::Net& kernel_cls1, const dnn::Net& kernel_r1)
+    {
+        CV_Assert(!siam_rpn.empty());
+        CV_Assert(!kernel_cls1.empty());
+        CV_Assert(!kernel_r1.empty());
+
+        siamRPN = siam_rpn;
+        siamKernelCL1 = kernel_cls1;
+        siamKernelR1 = kernel_r1;
+    }
+
     void init(InputArray image, const Rect& boundingBox) CV_OVERRIDE;
     bool update(InputArray image, Rect& boundingBox) CV_OVERRIDE;
     float getTrackingScore() CV_OVERRIDE;
-
-    TrackerDaSiamRPN::Params params;
 
 protected:
     dnn::Net siamRPN, siamKernelR1, siamKernelCL1;
@@ -160,7 +167,7 @@ void TrackerDaSiamRPNImpl::trackerInit(Mat img)
     dnn::blobFromImage(zCrop, blob, 1.0, Size(trackState.exemplarSize, trackState.exemplarSize), Scalar(), trackState.swapRB, false, CV_32F);
     siamRPN.setInput(blob);
     Mat out1;
-    siamRPN.forward(out1, "63");
+    siamRPN.forward(out1, "onnx_node_output_0!63");
 
     siamKernelCL1.setInput(out1);
     siamKernelR1.setInput(out1);
@@ -169,8 +176,8 @@ void TrackerDaSiamRPNImpl::trackerInit(Mat img)
     Mat r1 = siamKernelR1.forward();
     std::vector<int> r1_shape = { 20, 256, 4, 4 }, cls1_shape = { 10, 256, 4, 4 };
 
-    siamRPN.setParam(siamRPN.getLayerId("65"), 0, r1.reshape(0, r1_shape));
-    siamRPN.setParam(siamRPN.getLayerId("68"), 0, cls1.reshape(0, cls1_shape));
+    siamRPN.setParam(siamRPN.getLayerId("onnx_node_output_0!65"), 0, r1.reshape(0, r1_shape));
+    siamRPN.setParam(siamRPN.getLayerId("onnx_node_output_0!68"), 0, cls1.reshape(0, cls1_shape));
 }
 
 bool TrackerDaSiamRPNImpl::update(InputArray image, Rect& boundingBox)
@@ -425,16 +432,22 @@ Mat TrackerDaSiamRPNImpl::getSubwindow(Mat& img, const Rect2f& targetBox, float 
 
     return zCrop;
 }
+
 Ptr<TrackerDaSiamRPN> TrackerDaSiamRPN::create(const TrackerDaSiamRPN::Params& parameters)
 {
     return makePtr<TrackerDaSiamRPNImpl>(parameters);
+}
+
+Ptr<TrackerDaSiamRPN> TrackerDaSiamRPN::create(const dnn::Net& siam_rpn, const dnn::Net& kernel_cls1, const dnn::Net& kernel_r1)
+{
+    return makePtr<TrackerDaSiamRPNImpl>(siam_rpn, kernel_cls1, kernel_r1);
 }
 
 #else  // OPENCV_HAVE_DNN
 Ptr<TrackerDaSiamRPN> TrackerDaSiamRPN::create(const TrackerDaSiamRPN::Params& parameters)
 {
     (void)(parameters);
-    CV_Error(cv::Error::StsNotImplemented, "to use GOTURN, the tracking module needs to be built with opencv_dnn !");
+    CV_Error(cv::Error::StsNotImplemented, "to use DaSiamRPN, the tracking module needs to be built with opencv_dnn !");
 }
 #endif  // OPENCV_HAVE_DNN
 }

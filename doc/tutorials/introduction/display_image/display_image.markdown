@@ -9,6 +9,8 @@ Getting Started with Images {#tutorial_display_image}
 | Original author | Ana Huamán |
 | Compatibility | OpenCV >= 3.4.4 |
 
+@tableofcontents
+
 @warning
 This tutorial can contain obsolete information.
 
@@ -26,7 +28,7 @@ Source Code
 
 @add_toggle_cpp
 -   **Downloadable code**: Click
-    [here](https://github.com/opencv/opencv/tree/master/samples/cpp/tutorial_code/introduction/display_image/display_image.cpp)
+    [here](https://github.com/opencv/opencv/tree/4.x/samples/cpp/tutorial_code/introduction/display_image/display_image.cpp)
 
 -   **Code at glance:**
     @include samples/cpp/tutorial_code/introduction/display_image/display_image.cpp
@@ -34,7 +36,7 @@ Source Code
 
 @add_toggle_python
 -   **Downloadable code**: Click
-    [here](https://github.com/opencv/opencv/tree/master/samples/python/tutorial_code/introduction/display_image/display_image.py)
+    [here](https://github.com/opencv/opencv/tree/4.x/samples/python/tutorial_code/introduction/display_image/display_image.py)
 
 -   **Code at glance:**
     @include samples/python/tutorial_code/introduction/display_image/display_image.py

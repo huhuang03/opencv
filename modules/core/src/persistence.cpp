@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <iterator>
 
+#include <opencv2/core/utils/logger.hpp>
+
 namespace cv
 {
 
@@ -54,7 +56,29 @@ char* itoa( int _val, char* buffer, int /*radix*/ )
     return ptr;
 }
 
-char* doubleToString( char* buf, double value, bool explicitZero )
+char* itoa( int64_t _val, char* buffer, int /*radix*/, bool _signed)
+{
+    const int radix = 10;
+    char* ptr=buffer + 23 /* enough even for 64-bit integers */;
+    int sign = _signed && _val < 0 ? -1 : 1;
+    uint64_t val = !_signed ? (uint64_t)_val : abs(_val);
+
+    *ptr = '\0';
+    do
+    {
+        uint64_t r = val / radix;
+        *--ptr = (char)(val - (r*radix) + '0');
+        val = r;
+    }
+    while( val != 0 );
+
+    if( sign < 0 )
+        *--ptr = '-';
+
+    return ptr;
+}
+
+char* doubleToString( char* buf, size_t bufSize, double value, bool explicitZero )
 {
     Cv64suf val;
     unsigned ieee754_hi;
@@ -68,15 +92,17 @@ char* doubleToString( char* buf, double value, bool explicitZero )
         if( ivalue == value )
         {
             if( explicitZero )
-                sprintf( buf, "%d.0", ivalue );
+                snprintf( buf, bufSize, "%d.0", ivalue );
             else
-                sprintf( buf, "%d.", ivalue );
+                snprintf( buf, bufSize, "%d.", ivalue );
         }
         else
         {
-            static const char* fmt = "%.16e";
+            // binary64 has 52 bit fraction with hidden bit.
+            // 53 * log_10(2) is 15.955. So "%.16f" should be fine, but its test fails.
+            snprintf( buf, bufSize, "%.17g", value );
+
             char* ptr = buf;
-            sprintf( buf, fmt, value );
             if( *ptr == '+' || *ptr == '-' )
                 ptr++;
             for( ; cv_isdigit(*ptr); ptr++ )
@@ -97,7 +123,7 @@ char* doubleToString( char* buf, double value, bool explicitZero )
     return buf;
 }
 
-char* floatToString( char* buf, float value, bool halfprecision, bool explicitZero )
+char* floatToString( char* buf, size_t bufSize, float value, bool halfprecision, bool explicitZero )
 {
     Cv32suf val;
     unsigned ieee754;
@@ -110,17 +136,27 @@ char* floatToString( char* buf, float value, bool halfprecision, bool explicitZe
         if( ivalue == value )
         {
             if( explicitZero )
-                sprintf( buf, "%d.0", ivalue );
+                snprintf( buf, bufSize, "%d.0", ivalue );
             else
-                sprintf( buf, "%d.", ivalue );
+                snprintf( buf, bufSize, "%d.", ivalue );
         }
         else
         {
-            char* ptr = buf;
             if (halfprecision)
-                sprintf(buf, "%.4e", value);
+            {
+                // bfloat16 has 7 bit fraction with hidden bit.
+                // binary16 has 10 bit fraction with hidden bit.
+                // 11 * log_10(2) is 3.311. So "%.4f" should be fine, but its test fails.
+                snprintf(buf, bufSize, "%.5g", value);
+            }
             else
-                sprintf(buf, "%.8e", value);
+            {
+                // binray32 has 23 bit fraction with hidden bit.
+                // 24 * log_10(2) is 7.225. So "%.8f" should be fine, but its test fails.
+                snprintf(buf, bufSize, "%.9g", value);
+            }
+
+            char* ptr = buf;
             if( *ptr == '+' || *ptr == '-' )
                 ptr++;
             for( ; cv_isdigit(*ptr); ptr++ )
@@ -159,12 +195,19 @@ static int symbolToType(char c)
     return static_cast<int>(pos - symbols);
 }
 
-char* encodeFormat(int elem_type, char* dt)
+char* encodeFormat(int elem_type, char* dt, size_t dt_len)
 {
     int cn = (elem_type == CV_SEQ_ELTYPE_PTR/*CV_USRTYPE1*/) ? 1 : CV_MAT_CN(elem_type);
     char symbol = (elem_type == CV_SEQ_ELTYPE_PTR/*CV_USRTYPE1*/) ? 'r' : typeSymbol(CV_MAT_DEPTH(elem_type));
-    sprintf(dt, "%d%c", cn, symbol);
+    snprintf(dt, dt_len, "%d%c", cn, symbol);
     return dt + (cn == 1 ? 1 : 0);
+}
+
+// Deprecated due to size of dt buffer being unknowable.
+char* encodeFormat(int elem_type, char* dt)
+{
+    constexpr size_t max = 20+1+1; // UINT64_MAX + one char + nul termination.
+    return encodeFormat(elem_type, dt, max);
 }
 
 int decodeFormat( const char* dt, int* fmt_pairs, int max_len )
@@ -175,7 +218,7 @@ int decodeFormat( const char* dt, int* fmt_pairs, int max_len )
     if( !dt || !len )
         return 0;
 
-    assert( fmt_pairs != 0 && max_len > 0 );
+    CV_Assert( fmt_pairs != 0 && max_len > 0 );
     fmt_pairs[0] = 0;
     max_len *= 2;
 
@@ -261,7 +304,7 @@ int calcStructSize( const char* dt, int initial_size )
         case 'i': { elem_max_size = std::max( elem_max_size, sizeof(int   ) ); break; }
         case 'f': { elem_max_size = std::max( elem_max_size, sizeof(float ) ); break; }
         case 'd': { elem_max_size = std::max( elem_max_size, sizeof(double) ); break; }
-        case 'h': { elem_max_size = std::max(elem_max_size, sizeof(float16_t)); break; }
+        case 'h': { elem_max_size = std::max(elem_max_size, sizeof(hfloat)); break; }
         default:
             CV_Error_(Error::StsNotImplemented, ("Unknown type identifier: '%c' in '%s'", (char)(*type), dt));
         }
@@ -286,26 +329,47 @@ int decodeSimpleFormat( const char* dt )
 
 }
 
-#if defined __i386__ || defined(_M_IX86) || defined __x86_64__ || defined(_M_X64)
-#define CV_UNALIGNED_LITTLE_ENDIAN_MEM_ACCESS 1
+#if defined __i386__ || defined(_M_IX86) || defined __x86_64__ || defined(_M_X64) || \
+    (defined (__LITTLE_ENDIAN__) && __LITTLE_ENDIAN__)
+#define CV_LITTLE_ENDIAN_MEM_ACCESS 1
 #else
-#define CV_UNALIGNED_LITTLE_ENDIAN_MEM_ACCESS 0
+#define CV_LITTLE_ENDIAN_MEM_ACCESS 0
 #endif
 
 static inline int readInt(const uchar* p)
 {
-#if CV_UNALIGNED_LITTLE_ENDIAN_MEM_ACCESS
-    return *(const int*)p;
+    // On little endian CPUs, both branches produce the same result. On big endian, only the else branch does.
+#if CV_LITTLE_ENDIAN_MEM_ACCESS
+    int val;
+    memcpy(&val, p, sizeof(val));
+    return val;
 #else
     int val = (int)(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
     return val;
 #endif
 }
 
+static inline int64_t readLong(const uchar* p)
+{
+    // On little endian CPUs, both branches produce the same result. On big endian, only the else branch does.
+#if CV_LITTLE_ENDIAN_MEM_ACCESS
+    int64_t val;
+    memcpy(&val, p, sizeof(val));
+    return val;
+#else
+    unsigned val0 = (unsigned)(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
+    unsigned val1 = (unsigned)(p[4] | (p[5] << 8) | (p[6] << 16) | (p[7] << 24));
+    return val0 | ((int64_t)val1 << 32);
+#endif
+}
+
 static inline double readReal(const uchar* p)
 {
-#if CV_UNALIGNED_LITTLE_ENDIAN_MEM_ACCESS
-    return *(const double*)p;
+    // On little endian CPUs, both branches produce the same result. On big endian, only the else branch does.
+#if CV_LITTLE_ENDIAN_MEM_ACCESS
+    double val;
+    memcpy(&val, p, sizeof(val));
+    return val;
 #else
     unsigned val0 = (unsigned)(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
     unsigned val1 = (unsigned)(p[4] | (p[5] << 8) | (p[6] << 16) | (p[7] << 24));
@@ -315,24 +379,23 @@ static inline double readReal(const uchar* p)
 #endif
 }
 
-static inline void writeInt(uchar* p, int ival)
+template <typename T>
+static inline void writeInt(uchar* p, T ival)
 {
-#if CV_UNALIGNED_LITTLE_ENDIAN_MEM_ACCESS
-    int* ip = (int*)p;
-    *ip = ival;
+    // On little endian CPUs, both branches produce the same result. On big endian, only the else branch does.
+#if CV_LITTLE_ENDIAN_MEM_ACCESS
+    memcpy(p, &ival, sizeof(ival));
 #else
-    p[0] = (uchar)ival;
-    p[1] = (uchar)(ival >> 8);
-    p[2] = (uchar)(ival >> 16);
-    p[3] = (uchar)(ival >> 24);
+    for (size_t i = 0, j = 0; i < sizeof(ival); ++i, j += 8)
+        p[i] = (uchar)(ival >> j);
 #endif
 }
 
 static inline void writeReal(uchar* p, double fval)
 {
-#if CV_UNALIGNED_LITTLE_ENDIAN_MEM_ACCESS
-    double* fp = (double*)p;
-    *fp = fval;
+    // On little endian CPUs, both branches produce the same result. On big endian, only the else branch does.
+#if CV_LITTLE_ENDIAN_MEM_ACCESS
+    memcpy(p, &fval, sizeof(fval));
 #else
     Cv64suf v;
     v.f = fval;
@@ -499,21 +562,29 @@ bool FileStorage::Impl::open(const char *filename_or_buf, int _flags, const char
         if (!isGZ) {
             file = fopen(filename.c_str(), !write_mode ? "rt" : !append ? "wt" : "a+t");
             if (!file)
+            {
+                CV_LOG_ERROR(NULL, "Can't open file: '" << filename << "' in " << (!write_mode ? "read" : !append ? "write" : "append") << " mode");
                 return false;
+            }
         } else {
 #if USE_ZLIB
             char mode[] = {write_mode ? 'w' : 'r', 'b', compression ? compression : '3', '\0'};
             gzfile = gzopen(filename.c_str(), mode);
             if (!gzfile)
+            {
+                CV_LOG_ERROR(NULL, "Can't open archive: '" << filename << "' mode=" << mode);
                 return false;
+            }
 #else
             CV_Error(cv::Error::StsNotImplemented, "There is no compressed file storage support in this configuration");
 #endif
         }
     }
 
+    // FIXIT release() must do that, use CV_Assert() here instead
     roots.clear();
     fs_data.clear();
+
     wrap_margin = 71;
     fmt = FileStorage::FORMAT_AUTO;
 
@@ -575,7 +646,7 @@ bool FileStorage::Impl::open(const char *filename_or_buf, int _flags, const char
 
                     CV_Assert(strlen(encoding) < 1000);
                     char buf[1100];
-                    sprintf(buf, "<?xml version=\"1.0\" encoding=\"%s\"?>\n", encoding);
+                    snprintf(buf, sizeof(buf), "<?xml version=\"1.0\" encoding=\"%s\"?>\n", encoding);
                     puts(buf);
                 } else
                     puts("<?xml version=\"1.0\"?>\n");
@@ -616,14 +687,14 @@ bool FileStorage::Impl::open(const char *filename_or_buf, int _flags, const char
                 puts("\n");
             }
 
-            emitter = createXMLEmitter(this);
+            emitter_do_not_use_direct_dereference = createXMLEmitter(this);
         } else if (fmt == FileStorage::FORMAT_YAML) {
             if (!append)
                 puts("%YAML:1.0\n---\n");
             else
                 puts("...\n---\n");
 
-            emitter = createYAMLEmitter(this);
+            emitter_do_not_use_direct_dereference = createYAMLEmitter(this);
         } else {
             CV_Assert(fmt == FileStorage::FORMAT_JSON);
             if (!append)
@@ -653,7 +724,7 @@ bool FileStorage::Impl::open(const char *filename_or_buf, int _flags, const char
                 }
             }
             write_stack.back().indent = 4;
-            emitter = createJSONEmitter(this);
+            emitter_do_not_use_direct_dereference = createJSONEmitter(this);
         }
         is_opened = true;
     } else {
@@ -701,20 +772,20 @@ bool FileStorage::Impl::open(const char *filename_or_buf, int _flags, const char
 
             switch (fmt) {
                 case FileStorage::FORMAT_XML:
-                    parser = createXMLParser(this);
+                    parser_do_not_use_direct_dereference = createXMLParser(this);
                     break;
                 case FileStorage::FORMAT_YAML:
-                    parser = createYAMLParser(this);
+                    parser_do_not_use_direct_dereference = createYAMLParser(this);
                     break;
                 case FileStorage::FORMAT_JSON:
-                    parser = createJSONParser(this);
+                    parser_do_not_use_direct_dereference = createJSONParser(this);
                     break;
                 default:
-                    parser = Ptr<FileStorageParser>();
+                    parser_do_not_use_direct_dereference = Ptr<FileStorageParser>();
             }
 
-            if (!parser.empty()) {
-                ok = parser->parse(ptr);
+            if (!parser_do_not_use_direct_dereference.empty()) {
+                ok = getParser().parse(ptr);
                 if (ok) {
                     finalizeCollection(root_nodes);
 
@@ -728,7 +799,9 @@ bool FileStorage::Impl::open(const char *filename_or_buf, int _flags, const char
                 }
             }
         }
-        catch (...) {
+        catch (...)
+        {
+            // FIXIT log error message
             is_opened = true;
             release();
             throw;
@@ -805,7 +878,7 @@ char *FileStorage::Impl::gets(size_t maxCount) {
         int delta = (int) strlen(ptr);
         ofs += delta;
         maxCount -= delta;
-        if (ptr[delta - 1] == '\n' || maxCount == 0)
+        if (delta == 0 || ptr[delta - 1] == '\n' || maxCount == 0)
             break;
         if (delta == count)
             buffer.resize((size_t) (buffer.size() * 1.5));
@@ -926,7 +999,7 @@ void FileStorage::Impl::endWriteStruct() {
     if (fmt == FileStorage::FORMAT_JSON && !FileNode::isFlow(current_struct.flags) && write_stack.size() > 1)
         current_struct.indent = write_stack[write_stack.size() - 2].indent;
 
-    emitter->endWriteStruct(current_struct);
+    getEmitter().endWriteStruct(current_struct);
 
     write_stack.pop_back();
     if (!write_stack.empty())
@@ -945,7 +1018,7 @@ void FileStorage::Impl::startWriteStruct_helper(const char *key, int struct_flag
     if (type_name && type_name[0] == '\0')
         type_name = 0;
 
-    FStructData s = emitter->startWriteStruct(write_stack.back(), key, struct_flags, type_name);
+    FStructData s = getEmitter().startWriteStruct(write_stack.back(), key, struct_flags, type_name);
 
     write_stack.push_back(s);
     size_t write_stack_size = write_stack.size();
@@ -956,7 +1029,7 @@ void FileStorage::Impl::startWriteStruct_helper(const char *key, int struct_flag
         flush();
 
     if (fmt == FileStorage::FORMAT_JSON && type_name && type_name[0] && FileNode::isMap(struct_flags)) {
-        emitter->write("type_id", type_name, false);
+        getEmitter().write("type_id", type_name, false);
     }
 }
 
@@ -997,7 +1070,7 @@ void FileStorage::Impl::startWriteStruct(const char *key, int struct_flags,
 
 void FileStorage::Impl::writeComment(const char *comment, bool eol_comment) {
     CV_Assert(write_mode);
-    emitter->writeComment(comment, eol_comment);
+    getEmitter().writeComment(comment, eol_comment);
 }
 
 void FileStorage::Impl::startNextStream() {
@@ -1006,7 +1079,7 @@ void FileStorage::Impl::startNextStream() {
         while (!write_stack.empty())
             endWriteStruct();
         flush();
-        emitter->startNextStream();
+        getEmitter().startNextStream();
         empty_stream = true;
         write_stack.push_back(FStructData("", FileNode::EMPTY, 0));
         bufofs = 0;
@@ -1015,17 +1088,22 @@ void FileStorage::Impl::startNextStream() {
 
 void FileStorage::Impl::write(const String &key, int value) {
     CV_Assert(write_mode);
-    emitter->write(key.c_str(), value);
+    getEmitter().write(key.c_str(), value);
+}
+
+void FileStorage::Impl::write(const String &key, int64_t value) {
+    CV_Assert(write_mode);
+    getEmitter().write(key.c_str(), value);
 }
 
 void FileStorage::Impl::write(const String &key, double value) {
     CV_Assert(write_mode);
-    emitter->write(key.c_str(), value);
+    getEmitter().write(key.c_str(), value);
 }
 
 void FileStorage::Impl::write(const String &key, const String &value) {
     CV_Assert(write_mode);
-    emitter->write(key.c_str(), value.c_str(), false);
+    getEmitter().write(key.c_str(), value.c_str(), false);
 }
 
 void FileStorage::Impl::writeRawData(const std::string &dt, const void *_data, size_t len) {
@@ -1095,23 +1173,23 @@ void FileStorage::Impl::writeRawData(const std::string &dt, const void *_data, s
                         data += sizeof(int);
                         break;
                     case CV_32F:
-                        ptr = fs::floatToString(buf, *(float *) data, false, explicitZero);
+                        ptr = fs::floatToString(buf, sizeof(buf), *(float *) data, false, explicitZero);
                         data += sizeof(float);
                         break;
                     case CV_64F:
-                        ptr = fs::doubleToString(buf, *(double *) data, explicitZero);
+                        ptr = fs::doubleToString(buf, sizeof(buf), *(double *) data, explicitZero);
                         data += sizeof(double);
                         break;
                     case CV_16F: /* reference */
-                        ptr = fs::floatToString(buf, (float) *(float16_t *) data, true, explicitZero);
-                        data += sizeof(float16_t);
+                        ptr = fs::floatToString(buf, sizeof(buf), (float) *(hfloat *) data, true, explicitZero);
+                        data += sizeof(hfloat);
                         break;
                     default:
                         CV_Error(cv::Error::StsUnsupportedFormat, "Unsupported type");
                         return;
                 }
 
-                emitter->writeScalar(0, ptr);
+                getEmitter().writeScalar(0, ptr);
             }
 
             offset = (int) (data - data0);
@@ -1370,7 +1448,7 @@ void FileStorage::Impl::convertToCollection(int type, FileNode &node) {
     bool named = node.isNamed();
     uchar *ptr = node.ptr() + 1 + (named ? 4 : 0);
 
-    int ival = 0;
+    int64_t ival = 0;
     double fval = 0;
     std::string sval;
     bool add_first_scalar = false;
@@ -1383,7 +1461,7 @@ void FileStorage::Impl::convertToCollection(int type, FileNode &node) {
         // otherwise we don't know where to get the element names from
         CV_Assert(type == FileNode::SEQ);
         if (node_type == FileNode::INT) {
-            ival = readInt(ptr);
+            ival = readLong(ptr);
             add_first_scalar = true;
         } else if (node_type == FileNode::REAL) {
             fval = readReal(ptr);
@@ -1597,8 +1675,8 @@ FileStorage::Impl::Base64Decoder::Base64Decoder() {
     eos = true;
 }
 
-void FileStorage::Impl::Base64Decoder::init(Ptr<FileStorageParser> &_parser, char *_ptr, int _indent) {
-    parser = _parser;
+void FileStorage::Impl::Base64Decoder::init(const Ptr<FileStorageParser> &_parser, char *_ptr, int _indent) {
+    parser_do_not_use_direct_dereference = _parser;
     ptr = _ptr;
     indent = _indent;
     encoded.clear();
@@ -1641,9 +1719,9 @@ bool FileStorage::Impl::Base64Decoder::readMore(int needed) {
     decoded.resize(sz);
     ofs = 0;
 
-    CV_Assert(!parser.empty() && ptr);
+    CV_Assert(ptr);
     char *beg = 0, *end = 0;
-    bool ok = parser->getBase64Row(ptr, indent, beg, end);
+    bool ok = getParser().getBase64Row(ptr, indent, beg, end);
     ptr = end;
     std::copy(beg, end, std::back_inserter(encoded));
     totalchars += end - beg;
@@ -1730,7 +1808,7 @@ char *FileStorage::Impl::Base64Decoder::getPtr() const { return ptr; }
 char *FileStorage::Impl::parseBase64(char *ptr, int indent, FileNode &collection) {
     const int BASE64_HDR_SIZE = 24;
     char dt[BASE64_HDR_SIZE + 1] = {0};
-    base64decoder.init(parser, ptr, indent);
+    base64decoder.init(parser_do_not_use_direct_dereference, ptr, indent);
 
     int i, k;
 
@@ -1745,7 +1823,7 @@ char *FileStorage::Impl::parseBase64(char *ptr, int indent, FileNode &collection
 
     int fmt_pairs[CV_FS_MAX_FMT_PAIRS * 2];
     int fmt_pair_count = fs::decodeFormat(dt, fmt_pairs, CV_FS_MAX_FMT_PAIRS);
-    int ival = 0;
+    int64_t ival = 0;
     double fval = 0;
 
     for (;;) {
@@ -1783,7 +1861,7 @@ char *FileStorage::Impl::parseBase64(char *ptr, int indent, FileNode &collection
                         node_type = FileNode::REAL;
                         break;
                     case CV_16F:
-                        fval = (float) float16_t::fromBits(base64decoder.getUInt16());
+                        fval = float(hfloatFromBits(base64decoder.getUInt16()));
                         node_type = FileNode::REAL;
                         break;
                     default:
@@ -1985,6 +2063,11 @@ void writeScalar( FileStorage& fs, int value )
     fs.p->write(String(), value);
 }
 
+void writeScalar( FileStorage& fs, int64_t value )
+{
+    fs.p->write(String(), value);
+}
+
 void writeScalar( FileStorage& fs, float value )
 {
     fs.p->write(String(), (double)value);
@@ -2005,6 +2088,11 @@ void write( FileStorage& fs, const String& name, int value )
     fs.p->write(name, value);
 }
 
+void write( FileStorage& fs, const String& name, int64_t value )
+{
+    fs.p->write(name, value);
+}
+
 void write( FileStorage& fs, const String& name, float value )
 {
     fs.p->write(name, (double)value);
@@ -2021,6 +2109,7 @@ void write( FileStorage& fs, const String& name, const String& value )
 }
 
 void FileStorage::write(const String& name, int val) { p->write(name, val); }
+void FileStorage::write(const String& name, int64_t val) { p->write(name, val); }
 void FileStorage::write(const String& name, double val) { p->write(name, val); }
 void FileStorage::write(const String& name, const String& val) { p->write(name, val); }
 void FileStorage::write(const String& name, const Mat& val) { cv::write(*this, name, val); }
@@ -2241,6 +2330,27 @@ FileNode::operator int() const
         return 0x7fffffff;
 }
 
+FileNode::operator int64_t() const
+{
+    const uchar* p = ptr();
+    if(!p)
+        return 0;
+    int tag = *p;
+    int type = (tag & TYPE_MASK);
+    p += (tag & NAMED) ? 5 : 1;
+
+    if( type == INT )
+    {
+        return readLong(p);
+    }
+    else if( type == REAL )
+    {
+        return cvRound(readReal(p));
+    }
+    else
+        return 0x7fffffff;
+}
+
 FileNode::operator float() const
 {
     const uchar* p = ptr();
@@ -2331,7 +2441,7 @@ size_t FileNode::rawSize() const
         p += 4;
     size_t sz0 = (size_t)(p - p0);
     if( tp == INT )
-        return sz0 + 4;
+        return sz0 + 8;
     if( tp == REAL )
         return sz0 + 8;
     if( tp == NONE )
@@ -2365,7 +2475,7 @@ void FileNode::setValue( int type, const void* value, int len )
         sz += 4;
 
     if( type == INT )
-        sz += 4;
+        sz += 8;
     else if( type == REAL )
         sz += 8;
     else if( type == STRING )
@@ -2385,7 +2495,7 @@ void FileNode::setValue( int type, const void* value, int len )
 
     if( type == INT )
     {
-        int ival = *(const int*)value;
+        int64_t ival = *(const int64_t*)value;
         writeInt(p, ival);
     }
     else if( type == REAL )
@@ -2542,7 +2652,7 @@ FileNodeIterator& FileNodeIterator::readRaw( const String& fmt, void* _data0, si
                     FileNode node = *(*this);
                     if( node.isInt() )
                     {
-                        int ival = (int)node;
+                        int64_t ival = static_cast<int64_t>(elem_size == 8 ? (int64_t)node : (int)node);
                         switch( elem_type )
                         {
                         case CV_8U:
@@ -2562,7 +2672,7 @@ FileNodeIterator& FileNodeIterator::readRaw( const String& fmt, void* _data0, si
                             data += sizeof(short);
                             break;
                         case CV_32S:
-                            *(int*)data = ival;
+                            *(int*)data = (int)ival;
                             data += sizeof(int);
                             break;
                         case CV_32F:
@@ -2574,8 +2684,8 @@ FileNodeIterator& FileNodeIterator::readRaw( const String& fmt, void* _data0, si
                             data += sizeof(double);
                             break;
                         case CV_16F:
-                            *(float16_t*)data = float16_t((float)ival);
-                            data += sizeof(float16_t);
+                            *(hfloat*)data = hfloat((float)ival);
+                            data += sizeof(hfloat);
                             break;
                         default:
                             CV_Error( Error::StsUnsupportedFormat, "Unsupported type" );
@@ -2616,8 +2726,8 @@ FileNodeIterator& FileNodeIterator::readRaw( const String& fmt, void* _data0, si
                             data += sizeof(double);
                             break;
                         case CV_16F:
-                            *(float16_t*)data = float16_t((float)fval);
-                            data += sizeof(float16_t);
+                            *(hfloat*)data = hfloat((float)fval);
+                            data += sizeof(hfloat);
                             break;
                         default:
                             CV_Error( Error::StsUnsupportedFormat, "Unsupported type" );
@@ -2661,6 +2771,15 @@ void read(const FileNode& node, int& val, int default_val)
     if( !node.empty() )
     {
         val = (int)node;
+    }
+}
+
+void read(const FileNode& node, int64_t& val, int64_t default_val)
+{
+    val = default_val;
+    if( !node.empty() )
+    {
+        val = (int64_t)node;
     }
 }
 

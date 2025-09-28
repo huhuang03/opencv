@@ -51,7 +51,6 @@
 #include <set>
 #include <string>
 #include <sstream>
-#include <iostream> // std::cerr
 #include <fstream>
 #if !(defined _MSC_VER) || (defined _MSC_VER && _MSC_VER > 1700)
 #include <inttypes.h>
@@ -76,8 +75,11 @@
 #undef CV__ALLOCATOR_STATS_LOG
 
 #define CV_OPENCL_ALWAYS_SHOW_BUILD_LOG          0
+#define CV_OPENCL_SHOW_BUILD_OPTIONS             0
+#define CV_OPENCL_SHOW_BUILD_KERNELS             0
 
 #define CV_OPENCL_SHOW_RUN_KERNELS               0
+#define CV_OPENCL_SYNC_RUN_KERNELS               0
 #define CV_OPENCL_TRACE_CHECK                    0
 
 #define CV_OPENCL_VALIDATE_BINARY_PROGRAMS       1
@@ -150,6 +152,17 @@ static bool isRaiseError()
 }
 #endif
 
+static void onOpenCLKernelBuildError()
+{
+    // NB: no need to cache this value
+    bool value = cv::utils::getConfigurationParameterBool("OPENCV_OPENCL_ABORT_ON_BUILD_ERROR", false);
+    if (value)
+    {
+        fprintf(stderr, "Abort on OpenCL kernel build failure!\n");
+        abort();
+    }
+}
+
 #if CV_OPENCL_TRACE_CHECK
 static inline
 void traceOpenCLCheck(cl_int status, const char* message)
@@ -217,7 +230,7 @@ static const bool CV_OPENCL_DISABLE_BUFFER_RECT_OPERATIONS = utils::getConfigura
 #endif
 );
 
-static const String getBuildExtraOptions()
+static String getBuildExtraOptions()
 {
     static String param_buildExtraOptions;
     static bool initialized = false;
@@ -1157,10 +1170,10 @@ bool haveOpenCL()
     if (!g_isOpenCLInitialized)
     {
         CV_TRACE_REGION("Init_OpenCL_Runtime");
-        const char* envPath = getenv("OPENCV_OPENCL_RUNTIME");
-        if (envPath)
+        std::string envPath = utils::getConfigurationParameterString("OPENCV_OPENCL_RUNTIME");
+        if (!envPath.empty())
         {
-            if (cv::String(envPath) == "disabled")
+            if (envPath == "disabled")
             {
                 g_isOpenCLAvailable = false;
                 g_isOpenCLInitialized = true;
@@ -1591,13 +1604,16 @@ struct Device::Impl
             pos = pos2 + 1;
         }
 
+        khr_fp64_support_ = isExtensionSupported("cl_khr_fp64");
+        khr_fp16_support_ = isExtensionSupported("cl_khr_fp16");
+
         intelSubgroupsSupport_ = isExtensionSupported("cl_intel_subgroups");
 
         vendorName_ = getStrProp(CL_DEVICE_VENDOR);
         if (vendorName_ == "Advanced Micro Devices, Inc." ||
             vendorName_ == "AMD")
             vendorID_ = VENDOR_AMD;
-        else if (vendorName_ == "Intel(R) Corporation" || vendorName_ == "Intel" || strstr(name_.c_str(), "Iris") != 0)
+        else if (vendorName_ == "Intel(R) Corporation" || vendorName_ == "Intel" || vendorName_ == "Intel Inc." || strstr(name_.c_str(), "Iris") != 0)
             vendorID_ = VENDOR_INTEL;
         else if (vendorName_ == "NVIDIA Corporation")
             vendorID_ = VENDOR_NVIDIA;
@@ -1679,7 +1695,9 @@ struct Device::Impl
     String version_;
     std::string extensions_;
     int doubleFPConfig_;
+    bool khr_fp64_support_;
     int halfFPConfig_;
+    bool khr_fp16_support_;
     bool hostUnifiedMemory_;
     int maxComputeUnits_;
     size_t maxWorkGroupSize_;
@@ -1830,6 +1848,11 @@ int Device::singleFPConfig() const
 
 int Device::halfFPConfig() const
 { return p ? p->halfFPConfig_ : 0; }
+
+bool Device::hasFP64() const
+{ return p ? p->khr_fp64_support_ : false; }
+bool Device::hasFP16() const
+{ return p ? p->khr_fp16_support_ : false; }
 
 bool Device::endianLittle() const
 { return p ? p->getBoolProp(CL_DEVICE_ENDIAN_LITTLE) : false; }
@@ -2096,24 +2119,18 @@ static bool parseOpenCLDeviceConfiguration(const std::string& configurationStr,
     return true;
 }
 
-#if defined WINRT || defined _WIN32_WCE
-static cl_device_id selectOpenCLDevice(const char* configuration = NULL)
-{
-    CV_UNUSED(configuration)
-    return NULL;
-}
-#else
-static cl_device_id selectOpenCLDevice(const char* configuration = NULL)
+static cl_device_id selectOpenCLDevice(const std::string & configuration_ = std::string())
 {
     std::string platform, deviceName;
     std::vector<std::string> deviceTypes;
 
-    if (!configuration)
-        configuration = getenv("OPENCV_OPENCL_DEVICE");
+    std::string configuration(configuration_);
+    if (configuration.empty())
+        configuration = utils::getConfigurationParameterString("OPENCV_OPENCL_DEVICE");
 
-    if (configuration &&
-            (strcmp(configuration, "disabled") == 0 ||
-             !parseOpenCLDeviceConfiguration(std::string(configuration), platform, deviceTypes, deviceName)
+    if (!configuration.empty() &&
+            (configuration == "disabled" ||
+             !parseOpenCLDeviceConfiguration(configuration, platform, deviceTypes, deviceName)
             ))
         return NULL;
 
@@ -2155,20 +2172,22 @@ static cl_device_id selectOpenCLDevice(const char* configuration = NULL)
         platforms.resize(numPlatforms);
     }
 
-    int selectedPlatform = -1;
     if (platform.length() > 0)
     {
-        for (size_t i = 0; i < platforms.size(); i++)
+        for (std::vector<cl_platform_id>::iterator currentPlatform = platforms.begin(); currentPlatform != platforms.end();)
         {
             std::string name;
-            CV_OCL_DBG_CHECK(getStringInfo(clGetPlatformInfo, platforms[i], CL_PLATFORM_NAME, name));
+            CV_OCL_DBG_CHECK(getStringInfo(clGetPlatformInfo, *currentPlatform, CL_PLATFORM_NAME, name));
             if (name.find(platform) != std::string::npos)
             {
-                selectedPlatform = (int)i;
-                break;
+                ++currentPlatform;
+            }
+            else
+            {
+                currentPlatform = platforms.erase(currentPlatform);
             }
         }
-        if (selectedPlatform == -1)
+        if (platforms.size() == 0)
         {
             CV_LOG_ERROR(NULL, "OpenCL: Can't find OpenCL platform by name: " << platform);
             goto not_found;
@@ -2179,7 +2198,7 @@ static cl_device_id selectOpenCLDevice(const char* configuration = NULL)
         if (!isID)
         {
             deviceTypes.push_back("GPU");
-            if (configuration)
+            if (!configuration.empty())
                 deviceTypes.push_back("CPU");
         }
         else
@@ -2205,13 +2224,11 @@ static cl_device_id selectOpenCLDevice(const char* configuration = NULL)
             goto not_found;
         }
 
-        std::vector<cl_device_id> devices; // TODO Use clReleaseDevice to cleanup
-        for (int i = selectedPlatform >= 0 ? selectedPlatform : 0;
-                (selectedPlatform >= 0 ? i == selectedPlatform : true) && (i < (int)platforms.size());
-                i++)
+        std::vector<cl_device_id> devices;
+        for (std::vector<cl_platform_id>::iterator currentPlatform = platforms.begin(); currentPlatform != platforms.end(); ++currentPlatform)
         {
             cl_uint count = 0;
-            cl_int status = clGetDeviceIDs(platforms[i], deviceType, 0, NULL, &count);
+            cl_int status = clGetDeviceIDs(*currentPlatform, deviceType, 0, NULL, &count);
             if (!(status == CL_SUCCESS || status == CL_DEVICE_NOT_FOUND))
             {
                 CV_OCL_DBG_CHECK_RESULT(status, "clGetDeviceIDs get count");
@@ -2220,7 +2237,7 @@ static cl_device_id selectOpenCLDevice(const char* configuration = NULL)
                 continue;
             size_t base = devices.size();
             devices.resize(base + count);
-            status = clGetDeviceIDs(platforms[i], deviceType, count, &devices[base], &count);
+            status = clGetDeviceIDs(*currentPlatform, deviceType, count, &devices[base], &count);
             if (!(status == CL_SUCCESS || status == CL_DEVICE_NOT_FOUND))
             {
                 CV_OCL_DBG_CHECK_RESULT(status, "clGetDeviceIDs get IDs");
@@ -2249,7 +2266,7 @@ static cl_device_id selectOpenCLDevice(const char* configuration = NULL)
     }
 
 not_found:
-    if (!configuration)
+    if (configuration.empty())
         return NULL; // suppress messages on stderr
 
     std::ostringstream msg;
@@ -2264,7 +2281,6 @@ not_found:
     CV_LOG_ERROR(NULL, msg.str());
     return NULL;
 }
-#endif
 
 #ifdef HAVE_OPENCL_SVM
 namespace svm {
@@ -2317,12 +2333,12 @@ static unsigned int getSVMCapabilitiesMask()
     static unsigned int mask = 0;
     if (!initialized)
     {
-        const char* envValue = getenv("OPENCV_OPENCL_SVM_CAPABILITIES_MASK");
-        if (envValue == NULL)
+        const std::string envValue = utils::getConfigurationParameterString("OPENCV_OPENCL_SVM_CAPABILITIES_MASK");
+        if (envValue.empty())
         {
             return ~0U; // all bits 1
         }
-        mask = atoi(envValue);
+        mask = atoi(envValue.c_str());
         initialized = true;
     }
     return mask;
@@ -2459,8 +2475,8 @@ public:
         std::string configuration = configuration_;
         if (configuration_.empty())
         {
-            const char* c = getenv("OPENCV_OPENCL_DEVICE");
-            if (c)
+            const std::string c = utils::getConfigurationParameterString("OPENCV_OPENCL_DEVICE");
+            if (!c.empty())
                 configuration = c;
         }
         Impl* impl = findContext(configuration);
@@ -2471,7 +2487,7 @@ public:
             return impl;
         }
 
-        cl_device_id d = selectOpenCLDevice(configuration.empty() ? NULL : configuration.c_str());
+        cl_device_id d = selectOpenCLDevice(configuration);
         if (d == NULL)
             return NULL;
 
@@ -3484,8 +3500,10 @@ struct Kernel::Impl
 
     void addUMat(const UMat& m, bool dst)
     {
+        // TSAN false positive: see #27638
         CV_Assert(nu < MAX_ARRS && m.u && m.u->urefcount > 0);
         u[nu] = m.u;
+        // TSAN false positive: see #27638
         CV_XADD(&m.u->urefcount, 1);
         nu++;
         if(dst && m.u->tempUMat())
@@ -3677,6 +3695,10 @@ bool Kernel::empty() const
 
 static cv::String dumpValue(size_t sz, const void* p)
 {
+    if (!p)
+        return "NULL";
+    if (sz == 2)
+        return cv::format("%d / %uu / 0x%04x", *(short*)p, *(unsigned short*)p, *(short*)p);
     if (sz == 4)
         return cv::format("%d / %uu / 0x%08x / %g", *(int*)p, *(int*)p, *(int*)p, *(float*)p);
     if (sz == 8)
@@ -3849,6 +3871,14 @@ bool Kernel::run(int dims, size_t _globalsize[], size_t _localsize[],
 }
 
 
+bool Kernel::run_(int dims, size_t _globalsize[], size_t _localsize[],
+                  bool sync, const Queue& q)
+{
+    CV_Assert(p);
+    return p->run(dims, _globalsize, _localsize, sync, NULL, q);
+}
+
+
 static bool isRaiseErrorOnReuseAsyncKernel()
 {
     static bool initialized = false;
@@ -3888,6 +3918,10 @@ bool Kernel::Impl::run(int dims, size_t globalsize[], size_t localsize[],
             CV_Assert(0);
         return false;  // OpenCV 5.0: raise error
     }
+
+#if CV_OPENCL_SYNC_RUN_KERNELS
+    sync = true;
+#endif
 
     cl_command_queue qq = getQueue(q);
     if (haveTempDstUMats)
@@ -4336,7 +4370,28 @@ struct Program::Impl
             if (!param_buildExtraOptions.empty())
                 buildflags = joinBuildOptions(buildflags, param_buildExtraOptions);
         }
+#if CV_OPENCL_SHOW_BUILD_OPTIONS
+        CV_LOG_INFO(NULL, "OpenCL program '" << sourceModule_ << "/" << sourceName_ << "' options:" << buildflags);
+#endif
         compile(ctx, src_, errmsg);
+#if CV_OPENCL_SHOW_BUILD_KERNELS
+        if (handle)
+        {
+            size_t retsz = 0;
+            char kernels_buffer[4096] = {0};
+            cl_int result = clGetProgramInfo(handle, CL_PROGRAM_KERNEL_NAMES, sizeof(kernels_buffer), &kernels_buffer[0], &retsz);
+            CV_OCL_DBG_CHECK_RESULT(result, cv::format("clGetProgramInfo(CL_PROGRAM_KERNEL_NAMES: %s/%s)", sourceModule_.c_str(), sourceName_.c_str()).c_str());
+            if (result == CL_SUCCESS && retsz < sizeof(kernels_buffer))
+            {
+                kernels_buffer[retsz] = 0;
+                CV_LOG_INFO(NULL, "OpenCL program '" << sourceModule_ << "/" << sourceName_ << "' kernels: '" << kernels_buffer << "'");
+            }
+            else
+            {
+                CV_LOG_ERROR(NULL, "OpenCL program '" << sourceModule_ << "/" << sourceName_ << "' can't retrieve kernel names!");
+            }
+        }
+#endif
     }
 
     bool compile(const Context& ctx, const ProgramSource::Impl* src_, String& errmsg)
@@ -4553,6 +4608,12 @@ struct Program::Impl
                     CV_OCL_DBG_CHECK(clReleaseProgram(handle));
                     handle = NULL;
                 }
+                if (retval != CL_SUCCESS &&
+                    sourceName_ != "dummy"  // used for testing of compilation flags
+                )
+                {
+                    onOpenCLKernelBuildError();
+                }
             }
 #if CV_OPENCL_VALIDATE_BINARY_PROGRAMS
             if (handle && CV_OPENCL_VALIDATE_BINARY_PROGRAMS_VALUE)
@@ -4568,7 +4629,6 @@ struct Program::Impl
                 CV_LOG_INFO(NULL, result << ": Kernels='" << kernels_buffer << "'");
             }
 #endif
-
         }
         return handle != NULL;
     }
@@ -5612,6 +5672,7 @@ public:
         if(!u)
             return;
 
+        // Next two lines: TSAN false positive: see #27638
         CV_Assert(u->urefcount == 0);
         CV_Assert(u->refcount == 0 && "UMat deallocation error: some derived Mat is still alive");
 
@@ -6544,11 +6605,13 @@ public:
 
     void flushCleanupQueue() const
     {
+        // TSAN false positive: see #27638
         if (!cleanupQueue.empty())
         {
             std::deque<UMatData*> q;
             {
                 cv::AutoLock lock(cleanupQueueMutex);
+                // TSAN false positive: see #27638
                 q.swap(cleanupQueue);
             }
             for (std::deque<UMatData*>::const_iterator i = q.begin(); i != q.end(); ++i)
@@ -6927,7 +6990,7 @@ const char* typeToStr(int type)
     {
         "uchar", "uchar2", "uchar3", "uchar4", 0, 0, 0, "uchar8", 0, 0, 0, 0, 0, 0, 0, "uchar16",
         "char", "char2", "char3", "char4", 0, 0, 0, "char8", 0, 0, 0, 0, 0, 0, 0, "char16",
-        "ushort", "ushort2", "ushort3", "ushort4",0, 0, 0, "ushort8", 0, 0, 0, 0, 0, 0, 0, "ushort16",
+        "ushort", "ushort2", "ushort3", "ushort4", 0, 0, 0, "ushort8", 0, 0, 0, 0, 0, 0, 0, "ushort16",
         "short", "short2", "short3", "short4", 0, 0, 0, "short8", 0, 0, 0, 0, 0, 0, 0, "short16",
         "int", "int2", "int3", "int4", 0, 0, 0, "int8", 0, 0, 0, 0, 0, 0, 0, "int16",
         "float", "float2", "float3", "float4", 0, 0, 0, "float8", 0, 0, 0, 0, 0, 0, 0, "float16",
@@ -6936,7 +6999,7 @@ const char* typeToStr(int type)
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
     };
     int cn = CV_MAT_CN(type), depth = CV_MAT_DEPTH(type);
-    const char* result = cn > 16 ? 0 : tab[depth*16 + cn-1];
+    const char* result = cn > 16 ? nullptr : tab[depth*16 + cn-1];
     CV_Assert(result);
     return result;
 }
@@ -6947,7 +7010,7 @@ const char* memopTypeToStr(int type)
     {
         "uchar", "uchar2", "uchar3", "uchar4", 0, 0, 0, "uchar8", 0, 0, 0, 0, 0, 0, 0, "uchar16",
         "char", "char2", "char3", "char4", 0, 0, 0, "char8", 0, 0, 0, 0, 0, 0, 0, "char16",
-        "ushort", "ushort2", "ushort3", "ushort4",0, 0, 0, "ushort8", 0, 0, 0, 0, 0, 0, 0, "ushort16",
+        "ushort", "ushort2", "ushort3", "ushort4", 0, 0, 0, "ushort8", 0, 0, 0, 0, 0, 0, 0, "ushort16",
         "short", "short2", "short3", "short4", 0, 0, 0, "short8", 0, 0, 0, 0, 0, 0, 0, "short16",
         "int", "int2", "int3", "int4", 0, 0, 0, "int8", 0, 0, 0, 0, 0, 0, 0, "int16",
         "int", "int2", "int3", "int4", 0, 0, 0, "int8", 0, 0, 0, 0, 0, 0, 0, "int16",
@@ -6956,7 +7019,7 @@ const char* memopTypeToStr(int type)
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
     };
     int cn = CV_MAT_CN(type), depth = CV_MAT_DEPTH(type);
-    const char* result = cn > 16 ? 0 : tab[depth*16 + cn-1];
+    const char* result = cn > 16 ? nullptr : tab[depth*16 + cn-1];
     CV_Assert(result);
     return result;
 }
@@ -6981,7 +7044,16 @@ const char* vecopTypeToStr(int type)
     return result;
 }
 
+// Deprecated due to size of buf buffer being unknowable.
 const char* convertTypeStr(int sdepth, int ddepth, int cn, char* buf)
+{
+    // Since the size of buf is not given, we assume 50 because that's what all callers use.
+    constexpr size_t buf_max = 50;
+
+    return convertTypeStr(sdepth, ddepth, cn, buf, buf_max);
+}
+
+const char* convertTypeStr(int sdepth, int ddepth, int cn, char* buf, size_t buf_size)
 {
     if( sdepth == ddepth )
         return "noconvert";
@@ -6991,12 +7063,12 @@ const char* convertTypeStr(int sdepth, int ddepth, int cn, char* buf)
         (ddepth == CV_16S && sdepth <= CV_8S) ||
         (ddepth == CV_16U && sdepth == CV_8U))
     {
-        sprintf(buf, "convert_%s", typestr);
+        snprintf(buf, buf_size, "convert_%s", typestr);
     }
     else if( sdepth >= CV_32F )
-        sprintf(buf, "convert_%s%s_rte", typestr, (ddepth < CV_32S ? "_sat" : ""));
+        snprintf(buf, buf_size, "convert_%s%s_rte", typestr, (ddepth < CV_32S ? "_sat" : ""));
     else
-        sprintf(buf, "convert_%s_sat", typestr);
+        snprintf(buf, buf_size, "convert_%s_sat", typestr);
 
     return buf;
 }
@@ -7136,7 +7208,7 @@ String kernelToStr(InputArray _kernel, int ddepth, const char * name)
 
     typedef std::string (* func_t)(const Mat &);
     static const func_t funcs[] = { kerToStr<uchar>, kerToStr<char>, kerToStr<ushort>, kerToStr<short>,
-                                    kerToStr<int>, kerToStr<float>, kerToStr<double>, kerToStr<float16_t> };
+                                    kerToStr<int>, kerToStr<float>, kerToStr<double>, kerToStr<hfloat> };
     const func_t func = funcs[ddepth];
     CV_Assert(func != 0);
 

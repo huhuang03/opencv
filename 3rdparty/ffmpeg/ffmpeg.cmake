@@ -1,8 +1,8 @@
-# Binaries branch name: ffmpeg/master_20210608
-# Binaries were created for OpenCV: eaa9228a4fdfb9c2465aea65a50ce2d16b55dce0
-ocv_update(FFMPEG_BINARIES_COMMIT "213fcd5d4897319a83207406036c4a5957fba010")
-ocv_update(FFMPEG_FILE_HASH_BIN32 "bab661341c30862fa88627130219c0a5")
-ocv_update(FFMPEG_FILE_HASH_BIN64 "ac99f9767a83103c31709628af685924")
+# Binaries branch name: ffmpeg/4.x_20250625
+# Binaries were created for OpenCV: e9f1da7e8e977a65b8bf8fe7ea8b92eef9171f19
+ocv_update(FFMPEG_BINARIES_COMMIT "ea9240e39bc0d6a69d2b1f0ba4513bdc7612a41e")
+ocv_update(FFMPEG_FILE_HASH_BIN32 "2821ea672a11147a70974d760a54e9bc")
+ocv_update(FFMPEG_FILE_HASH_BIN64 "e5c6936240201064b15bcecf1816e8f4")
 ocv_update(FFMPEG_FILE_HASH_CMAKE "8862c87496e2e8c375965e1277dee1c7")
 
 function(download_win_ffmpeg script_var)

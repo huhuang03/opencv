@@ -246,7 +246,7 @@ void Cloning::initVariables(const Mat &destination, const Mat &binaryMask)
         filter_Y[j] = 2.0f * (float)std::cos(scale * (j + 1));
 }
 
-void Cloning::computeDerivatives(const Mat& destination, const Mat &patch, const Mat &binaryMask)
+void Cloning::computeDerivatives(const Mat& destination, const Mat &patch, Mat &binaryMask)
 {
     initVariables(destination, binaryMask);
 
@@ -306,7 +306,7 @@ void Cloning::poisson(const Mat &destination)
     }
 }
 
-void Cloning::evaluate(const Mat &I, const Mat &wmask, const Mat &cloned)
+void Cloning::evaluate(const Mat &I, Mat &wmask, const Mat &cloned)
 {
     bitwise_not(wmask,wmask);
 
@@ -320,7 +320,7 @@ void Cloning::evaluate(const Mat &I, const Mat &wmask, const Mat &cloned)
     merge(output,cloned);
 }
 
-void Cloning::normalClone(const Mat &destination, const Mat &patch, const Mat &binaryMask, Mat &cloned, int flag)
+void Cloning::normalClone(const Mat &destination, const Mat &patch, Mat &binaryMask, Mat &cloned, int flag)
 {
     const int w = destination.cols;
     const int h = destination.rows;
@@ -332,11 +332,13 @@ void Cloning::normalClone(const Mat &destination, const Mat &patch, const Mat &b
     switch(flag)
     {
         case NORMAL_CLONE:
+        case NORMAL_CLONE_WIDE:
             arrayProduct(patchGradientX, binaryMaskFloat, patchGradientX);
             arrayProduct(patchGradientY, binaryMaskFloat, patchGradientY);
             break;
 
         case MIXED_CLONE:
+        case MIXED_CLONE_WIDE:
         {
             AutoBuffer<int> maskIndices(n_elem_in_line);
             for (int i = 0; i < n_elem_in_line; ++i)
@@ -373,6 +375,7 @@ void Cloning::normalClone(const Mat &destination, const Mat &patch, const Mat &b
         break;
 
         case MONOCHROME_TRANSFER:
+        case MONOCHROME_TRANSFER_WIDE:
             Mat gray;
             cvtColor(patch, gray, COLOR_BGR2GRAY );
 

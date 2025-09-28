@@ -4,7 +4,9 @@ Using OpenCV.js {#tutorial_js_usage}
 Steps
 -----
 
-In this tutorial, you will learn how to include and start to use `opencv.js` inside a web page. You can get a copy of `opencv.js` from `opencv-{VERSION_NUMBER}-docs.zip` in each [release](https://github.com/opencv/opencv/releases), or simply download the prebuilt script from the online documentations at "https://docs.opencv.org/{VERSION_NUMBER}/opencv.js" (For example, [https://docs.opencv.org/3.4.0/opencv.js](https://docs.opencv.org/3.4.0/opencv.js). Use `master` if you want the latest build). You can also build your own copy by following the tutorial on Build Opencv.js.
+In this tutorial, you will learn how to include and start to use `opencv.js` inside a web page.
+You can get a copy of `opencv.js` from `opencv-{VERSION_NUMBER}-docs.zip` in each [release](https://github.com/opencv/opencv/releases), or simply download the prebuilt script from the online documentations at "https://docs.opencv.org/{VERSION_NUMBER}/opencv.js" (For example, [https://docs.opencv.org/4.5.0/opencv.js](https://docs.opencv.org/4.5.0/opencv.js). Use `4.x` if you want the latest build).
+You can also build your own copy by following the tutorial @ref tutorial_js_setup.
 
 ### Create a web page
 
@@ -61,13 +63,16 @@ Example for asynchronous loading
 ### Use OpenCV.js
 
 Once `opencv.js` is ready, you can access OpenCV objects and functions through `cv` object.
+The promise-typed `cv` object should be unwrap with `await` operator.
+See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/await .
 
 For example, you can create a cv.Mat from an image by cv.imread.
 
 @note Because image loading is asynchronous, you need to put cv.Mat creation inside the `onload` callback.
 
 @code{.js}
-imgElement.onload = function() {
+imgElement.onload = await function() {
+  cv = (cv instanceof Promise) ? await cv : cv;
   let mat = cv.imread(imgElement);
 }
 @endcode
@@ -114,17 +119,21 @@ inputElement.addEventListener('change', (e) => {
   imgElement.src = URL.createObjectURL(e.target.files[0]);
 }, false);
 
-imgElement.onload = function() {
+imgElement.onload = async function() {
+  cv = (cv instanceof Promise) ? await cv : cv;
   let mat = cv.imread(imgElement);
   cv.imshow('canvasOutput', mat);
   mat.delete();
 };
 
-function onOpenCvReady() {
-  document.getElementById('status').innerHTML = 'OpenCV.js is ready.';
-}
+var Module = {
+  // https://emscripten.org/docs/api_reference/module.html#Module.onRuntimeInitialized
+  onRuntimeInitialized() {
+    document.getElementById('status').innerHTML = 'OpenCV.js is ready.';
+  }
+};
 </script>
-<script async src="opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+<script async src="opencv.js" type="text/javascript"></script>
 </body>
 </html>
 @endcode

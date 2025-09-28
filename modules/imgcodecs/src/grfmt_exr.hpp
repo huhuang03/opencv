@@ -53,6 +53,7 @@
 #include <ImfInputFile.h>
 #include <ImfChannelList.h>
 #include <ImathBox.h>
+#include <ImfRgbaFile.h>
 #include "grfmt_base.hpp"
 
 namespace cv
@@ -82,6 +83,7 @@ protected:
     void  UpSampleX( float *data, int xstep, int xsample );
     void  UpSampleY( uchar *data, int xstep, int ystep, int ysample );
     void  ChromaToBGR( float *data, int numlines, int xstep, int ystep );
+    void  ChromaToRGB( float *data, int numlines, int xstep, int ystep );
     void  RGBToGray( float *in, float *out );
 
     InputFile      *m_file;
@@ -98,6 +100,8 @@ protected:
     bool            m_iscolor;
     bool            m_isfloat;
     bool            m_hasalpha;
+    bool            m_multispectral;
+    int             m_channels;
 
 private:
     ExrDecoder(const ExrDecoder &); // copy disabled
