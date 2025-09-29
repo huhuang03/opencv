@@ -135,13 +135,9 @@ endif()
 project(OpenCV CXX C)
 
 set(ANDROID_PYTHON OFF CACHE INTERNAL "Build python binding on Android")
-message("ANDROID: ${ANDROID}, BUILD_opencv_python3: ${BUILD_opencv_python3}")
 if(ANDROID AND BUILD_opencv_python3)
     set(ANDROID_PYTHON ON CACHE INTERNAL "Build python binding on Android")
 endif()
-
-message("111 ANDROID_PYTHON: ${ANDROID_PYTHON}")
-
 
 if(OPENCV_WORKAROUND_CMAKE_20989)
   set(CMAKE_SYSTEM_PROCESSOR ${CMAKE_SYSTEM_PROCESSOR_BACKUP})

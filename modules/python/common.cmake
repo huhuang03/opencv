@@ -14,11 +14,14 @@ ocv_module_include_directories(
 
 # try to use dynamic symbols linking with libpython.so
 set(OPENCV_FORCE_PYTHON_LIBS OFF CACHE BOOL "")
-string(REPLACE "-Wl,--no-undefined" "" CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS}")
+#string(REPLACE "-Wl,--no-undefined" "" CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS}")
+string(REGEX REPLACE "(^| )-Wl,--no-undefined( |$)" " " CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS}")
 if(NOT WIN32 AND NOT APPLE AND NOT OPENCV_PYTHON_SKIP_LINKER_EXCLUDE_LIBS)
   set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,--exclude-libs=ALL")
 endif()
 
+message("111 the_module: ${the_module}")
+message("11 now flags: ${CMAKE_CXX_FLAGS}")
 ocv_add_library(${the_module} MODULE
   ${PYTHON_SOURCE_DIR}/src2/cv2.cpp
   ${PYTHON_SOURCE_DIR}/src2/cv2_util.cpp
@@ -31,13 +34,17 @@ ocv_add_library(${the_module} MODULE
 )
 
 if(TARGET gen_opencv_python_source)
+  message("111 in gen_opencv_python_source")
+  # go here!!!
   add_dependencies(${the_module} gen_opencv_python_source)
 endif()
 
 if(TARGET copy_opencv_typing_stubs)
   # Python 3.6+
+  message("111 in copy_opencv_typing_stubs")
   add_dependencies(${the_module} copy_opencv_typing_stubs)
 endif()
+message("11111 mark 11111")
 
 ocv_assert(${PYTHON}_VERSION_MAJOR)
 ocv_assert(${PYTHON}_VERSION_MINOR)
@@ -71,6 +78,7 @@ if(TARGET gen_opencv_python_source)
   list(REMOVE_ITEM deps opencv_python_bindings_generator) # don't add dummy module to target_link_libraries list
 endif()
 ocv_target_link_libraries(${the_module} PRIVATE ${deps})
+message("111111 deps: ${deps}")
 
 if(DEFINED ${PYTHON}_CVPY_SUFFIX)
   set(CVPY_SUFFIX "${${PYTHON}_CVPY_SUFFIX}")
@@ -79,6 +87,8 @@ else()
   if("${${PYTHON}_VERSION_MAJOR}" STREQUAL "2")
     set(__python_ext_suffix_var "SO")
   endif()
+  message("1111111 come here!!!!")
+  # I think it's ok to just use so
   execute_process(COMMAND ${${PYTHON}_EXECUTABLE} -c "import sysconfig; print(sysconfig.get_config_var('${__python_ext_suffix_var}'))"
                   RESULT_VARIABLE PYTHON_CVPY_PROCESS
                   OUTPUT_VARIABLE CVPY_SUFFIX
@@ -241,3 +251,8 @@ unset(PYTHON_CVPY_PROCESS)
 unset(CVPY_SUFFIX)
 unset(PYTHON_INSTALL_CONFIGURATIONS)
 unset(PYTHON_INSTALL_ARCHIVE)
+
+message("the_module: ${the_module}")
+get_target_property(OPTIONS ${the_module} LINK_OPTIONS)
+#message(STATUS "LINK_OPTIONS: ${OPTIONS}")
+message("1111 result CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}, link_options: ${OPTIONS}")
