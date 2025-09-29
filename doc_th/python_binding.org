@@ -11,3 +11,5 @@ if(BUILD_opencv_python3)
 # balabala
 endif()
 #+end_src
+
+cmake .. --trace-expand | grep HAVE_opencv_python3
