@@ -1,0 +1,21 @@
+Debug where to set
+#+begin_src cmake
+function(trace_variable var)
+    variable_watch(${var} _trace_callback)
+endfunction()
+
+function(_trace_callback var access value current_list_file stack)
+    message(STATUS "[TRACE] ${var} was ${access} with value \"${value}\" in ${current_list_file}")
+endfunction()
+
+# hook
+trace_variable(HAVE_opencv_python3)
+#+end_src
+
+
+cmake .. --trace-expand 2>&1 | grep HAVE_opencv_python3
+
+
+and find
+
+/app/opencv/cmake/OpenCVModule.cmake(232):  set(HAVE_opencv_python3 OFF CACHE INTERNAL Module opencv_python3 can not be built in current configuration )
